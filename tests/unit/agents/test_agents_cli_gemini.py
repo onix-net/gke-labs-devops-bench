@@ -648,8 +648,11 @@ def test_build_settings_combines_mcp_servers_and_skills_flag() -> None:
     assert _build_settings((binding,), skills_enabled=True) == {
         "mcpServers": {"gke": {"command": "gke-mcp"}},
         "skills": {"enabled": True},
+        "experimental": {"dynamicModelConfiguration": True},
     }
-    assert _build_settings((), skills_enabled=False) == {}
+    assert _build_settings((), skills_enabled=False) == {
+        "experimental": {"dynamicModelConfiguration": True},
+    }
 
 
 def test_execute_writes_mcp_servers_into_workspace_settings(
@@ -676,15 +679,21 @@ def test_execute_writes_mcp_servers_into_workspace_settings(
     assert captured["settings"]["mcpServers"] == {"gke": {"command": "gke-mcp"}}
 
 
-def test_execute_writes_no_settings_when_no_command_and_no_skills(
+def test_execute_writes_settings_with_dynamic_model_configuration_when_no_command_and_no_skills(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No launchable MCP server and no skills → no settings.json is written."""
+    """No launchable MCP server and no skills → settings.json is still written,
+    carrying the dynamic-model-configuration flag: without it the CLI silently
+    aliases the requested model to a different one while echoing the requested
+    id back in its output."""
     captured: dict = {}
 
     def fake_run(argv, **kwargs):
         settings_path = os.path.join(kwargs["cwd"], ".gemini", "settings.json")
         captured["exists"] = os.path.exists(settings_path)
+        if captured["exists"]:
+            with open(settings_path) as f:
+                captured["settings"] = json.load(f)
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
     monkeypatch.setattr(gemini_mod, "run", fake_run)
@@ -693,7 +702,31 @@ def test_execute_writes_no_settings_when_no_command_and_no_skills(
         mcp_servers=(McpBinding(name="builtin", command=(), tools=("alpha",)),),
     )
     GeminiCliAgent(AgentConfig(target="gemini", capabilities=caps)).run("p")
-    assert captured["exists"] is False
+    assert captured["exists"] is True
+    assert captured["settings"] == {"experimental": {"dynamicModelConfiguration": True}}
+
+
+def test_execute_writes_dynamic_model_configuration_merged_with_mcp_servers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When other settings content exists (mcpServers), the flag is merged in
+    without clobbering the rest of the payload."""
+    captured: dict = {}
+
+    def fake_run(argv, **kwargs):
+        settings_path = os.path.join(kwargs["cwd"], ".gemini", "settings.json")
+        with open(settings_path) as f:
+            captured["settings"] = json.load(f)
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    caps = AllCapabilities(
+        mcp_servers=(McpBinding(name="gke", command=("gke-mcp",), tools=("mcp_gke_x",)),),
+    )
+    GeminiCliAgent(AgentConfig(target="gemini", capabilities=caps)).run("p")
+
+    assert captured["settings"]["mcpServers"] == {"gke": {"command": "gke-mcp"}}
+    assert captured["settings"]["experimental"] == {"dynamicModelConfiguration": True}
 
 
 def test_execute_materializes_skills_into_workspace(
@@ -731,18 +764,19 @@ def test_execute_materializes_skills_into_workspace(
 
 
 def test_execute_warns_and_skips_missing_skill_paths(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A non-existent skill path is skipped (no settings.json, no crash)."""
+    """A non-existent skill path is skipped (no ``skills`` key, no crash)."""
     captured: dict = {}
 
     def fake_run(argv, **kwargs):
         settings_path = os.path.join(kwargs["cwd"], ".gemini", "settings.json")
-        captured["exists"] = os.path.exists(settings_path)
+        with open(settings_path) as f:
+            captured["settings"] = json.load(f)
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
     monkeypatch.setattr(gemini_mod, "run", fake_run)
     caps = AllCapabilities(skills=SkillBinding(paths=("/no/such/skills/dir",)))
     GeminiCliAgent(AgentConfig(target="gemini", capabilities=caps)).run("p")
-    assert captured["exists"] is False
+    assert "skills" not in captured["settings"]
 
 
 # ---------------------------------------------------------------------------

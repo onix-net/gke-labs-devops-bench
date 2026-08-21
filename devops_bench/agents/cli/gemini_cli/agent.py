@@ -83,7 +83,10 @@ def _build_settings(mcp_servers: tuple[McpBinding, ...], *, skills_enabled: bool
             the user-level default.
 
     Returns:
-        A settings mapping, possibly empty (caller skips the write when empty).
+        A settings mapping. Always carries
+        ``experimental.dynamicModelConfiguration``: without it the CLI silently
+        aliases the requested model to a different one while echoing the
+        requested id back in its output.
     """
     settings: dict = {}
     servers = build_mcp_servers(mcp_servers)
@@ -91,6 +94,10 @@ def _build_settings(mcp_servers: tuple[McpBinding, ...], *, skills_enabled: bool
         settings["mcpServers"] = servers
     if skills_enabled:
         settings["skills"] = {"enabled": True}
+    settings["experimental"] = {
+        **settings.get("experimental", {}),
+        "dynamicModelConfiguration": True,
+    }
     return settings
 
 
@@ -217,8 +224,10 @@ class GeminiCliAgent(AgentHarness):
         user's ``~/.gemini`` stays untouched and concurrent runs never race):
 
         * ``GEMINI.md`` — the operator brief, when ``rules.text`` is set.
-        * ``.gemini/settings.json`` — ``mcpServers`` for each command-bearing
-          MCP binding, plus ``skills.enabled`` when skills were materialized.
+        * ``.gemini/settings.json`` — always written: ``mcpServers`` for each
+          command-bearing MCP binding, ``skills.enabled`` when skills were
+          materialized, and ``experimental.dynamicModelConfiguration``
+          unconditionally.
         * ``.gemini/skills/<name>/SKILL.md`` — one per discovered skill.
 
         A temp working directory (used when ``workspace_path`` is ``None``) is
@@ -238,11 +247,10 @@ class GeminiCliAgent(AgentHarness):
             gemini_dir = workdir / _GEMINI_CONFIG_DIR
             skill_names = materialize_skills(gemini_dir / _GEMINI_SKILLS_DIR, caps.skills.paths)
             settings = _build_settings(caps.mcp_servers, skills_enabled=bool(skill_names))
-            if settings:
-                gemini_dir.mkdir(parents=True, exist_ok=True)
-                (gemini_dir / _GEMINI_SETTINGS_FILE).write_text(
-                    json.dumps(settings, indent=2), encoding="utf-8"
-                )
+            gemini_dir.mkdir(parents=True, exist_ok=True)
+            (gemini_dir / _GEMINI_SETTINGS_FILE).write_text(
+                json.dumps(settings, indent=2), encoding="utf-8"
+            )
             # Containerised execution, opt-in via BENCH_AGENT_SANDBOX=docker.
             #
             # Everything above still runs on the host: GEMINI.md, settings.json and the

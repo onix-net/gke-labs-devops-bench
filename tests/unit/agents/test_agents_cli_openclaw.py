@@ -703,17 +703,18 @@ def test_model_override_empty_when_no_model() -> None:
     assert _build_model_override(AgentConfig()) == {}
 
 
-def test_model_override_genai_pins_generative_ai_transport() -> None:
+@pytest.mark.parametrize("model", ["gemini-3.5-flash", "gemini-3.7-flash"])
+def test_model_override_genai_pins_generative_ai_transport(model: str) -> None:
     """google-genai: the entry pins ``api: google-generative-ai`` so oc routes it
     through the google-genai transport (a per-run provider entry replaces oc's
     built-in one, so the transport must be carried) and needs no ``baseUrl``.
     Allowlists ``google/<model>``."""
-    override = _build_model_override(AgentConfig(model="gemini-3.5-flash", provider="google"))
+    override = _build_model_override(AgentConfig(model=model, provider="google"))
     google = override["models"]["providers"]["google"]
     assert google["api"] == "google-generative-ai"
     assert "baseUrl" not in google
-    assert google["models"] == [{"id": "gemini-3.5-flash", "name": "gemini-3.5-flash"}]
-    assert override["agents"]["defaults"]["models"] == {"google/gemini-3.5-flash": {}}
+    assert google["models"] == [{"id": model, "name": model}]
+    assert override["agents"]["defaults"]["models"] == {f"google/{model}": {}}
 
 
 def test_model_override_gemini_alias_normalizes_to_google() -> None:

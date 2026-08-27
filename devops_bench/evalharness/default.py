@@ -107,6 +107,18 @@ _DEFAULT_AGENT_TYPE = "gemini-cli"
 _STATUS_AGENT_ERROR = "agent_error"
 _STATUS_AGENT_TIMEOUT = "agent_timeout"
 
+# ``task_dir_purge_status`` values recorded on every result record, so a run
+# where the answer key stayed on disk (a failed or skipped purge) can be
+# identified and excluded from analysis after the fact, rather than reading
+# indistinguishably from a run that purged cleanly. See ``_purge_task_dir``.
+_PURGE_STATUS_NOT_RUN = "not_run"
+_PURGE_STATUS_PURGED = "purged"
+_PURGE_STATUS_KEPT_ENV_OVERRIDE = "kept_env_override"
+_PURGE_STATUS_NO_TASK_DIR = "no_task_dir"
+_PURGE_STATUS_ALREADY_MISSING = "already_missing"
+_PURGE_STATUS_REFUSED_OUTSIDE_TASKS_ROOT = "refused_outside_tasks_root"
+_PURGE_STATUS_FAILED = "failed"
+
 # Default target deployment + namespace used both for placeholder
 # substitution in the agent prompt and as the chaos port-forward target, so the
 # operator agent and the chaos injector address the same workload when env is
@@ -795,7 +807,7 @@ class DefaultEvalHarness(Harness):
 
     # -- agent execution --------------------------------------------------
 
-    def _purge_task_dir(self, task: Task) -> None:
+    def _purge_task_dir(self, task: Task) -> str:
         """Delete the task's on-disk directory before the agent's turn.
 
         The task directory holds ``GRADING.md`` (explicit answer material),
@@ -815,15 +827,23 @@ class DefaultEvalHarness(Harness):
 
         Controlled by ``BENCH_KEEP_TASK_DIR`` (default: purge). Set truthy
         to keep the directory around for local debugging.
+
+        Returns:
+            One of the ``_PURGE_STATUS_*`` constants, recorded on the result
+            record as ``task_dir_purge_status`` so a run where the answer key
+            stayed on disk (a failed or skipped purge) can be identified and
+            excluded from analysis, rather than being indistinguishable from
+            a run that purged cleanly. Never raises: a failed purge must not
+            abort the run, the agent's turn still has to happen.
         """
         if get_bool("BENCH_KEEP_TASK_DIR"):
-            return
+            return _PURGE_STATUS_KEPT_ENV_OVERRIDE
         if not task.task_dir:
-            return
+            return _PURGE_STATUS_NO_TASK_DIR
         task_dir = Path(task.task_dir).resolve()
         if not task_dir.exists():
             _log.warning("task directory to purge does not exist, skipping: %s", task_dir)
-            return
+            return _PURGE_STATUS_ALREADY_MISSING
         if self._tasks_root is not None and (
             task_dir == self._tasks_root or self._tasks_root not in task_dir.parents
         ):
@@ -832,7 +852,7 @@ class DefaultEvalHarness(Harness):
                 task_dir,
                 self._tasks_root,
             )
-            return
+            return _PURGE_STATUS_REFUSED_OUTSIDE_TASKS_ROOT
         try:
             shutil.rmtree(task_dir)
         except OSError as exc:
@@ -840,6 +860,8 @@ class DefaultEvalHarness(Harness):
             # has to happen), but it does mean the leak this exists to close
             # stays open, so it is logged at warning level rather than swallowed.
             _log.warning("failed to purge task directory %s: %s", task_dir, exc)
+            return _PURGE_STATUS_FAILED
+        return _PURGE_STATUS_PURGED
 
     def execute_agent(self, prompt: str, ctx: RunContext) -> AgentResult:
         """Run the configured agent against ``prompt`` through the registry.
@@ -1008,6 +1030,11 @@ class DefaultEvalHarness(Harness):
         # record must say so rather than defaulting to a falsely complete
         # artifact_collection field.
         artifact_collection_attempted = False
+        # Records whether the answer key ever actually left disk before the
+        # agent's turn. Stays "not_run" if an exception aborts the task before
+        # ``_purge_task_dir`` is reached (e.g. infra provisioning failed), which
+        # is itself meaningful: the purge never had a chance to run.
+        task_dir_purge_status = _PURGE_STATUS_NOT_RUN
         # Track the substituted prompt / expectation / safety checklists as they
         # are computed so a failed record can carry the same resolved strings a
         # success record would, falling back to the raw task fields before
@@ -1129,7 +1156,7 @@ class DefaultEvalHarness(Harness):
             # Remove the task's on-disk directory now, so the agent's turn
             # cannot read the answer key off the executor filesystem. See
             # ``_purge_task_dir`` for why this is safe at this point.
-            self._purge_task_dir(task)
+            task_dir_purge_status = self._purge_task_dir(task)
 
             _log.info("executing agent for prompt: %s", prompt)
             before_files = snapshot_dir(workspace_path)
@@ -1192,6 +1219,7 @@ class DefaultEvalHarness(Harness):
                 verification_status=verification_status,
                 recoverable_safety=recoverable_safety,
                 artifact_collection_failures=artifact_collection_failures,
+                task_dir_purge_status=task_dir_purge_status,
             )
             _log.info("agent response for %s:\n%s", task.name, result["output"])
         except Exception as exc:  # noqa: BLE001 - surface every task failure
@@ -1249,6 +1277,7 @@ class DefaultEvalHarness(Harness):
                 verification_status=exception_verification_status,
                 artifact_collection_failures=artifact_collection_failures,
                 artifact_collection_attempted=artifact_collection_attempted,
+                task_dir_purge_status=task_dir_purge_status,
             )
         finally:
             if scenario_manager is not None:
@@ -1303,6 +1332,7 @@ class DefaultEvalHarness(Harness):
         verification_status: str = "evaluated",
         recoverable_safety: list[str] | None = None,
         artifact_collection_failures: list[dict[str, str]] | None = None,
+        task_dir_purge_status: str = _PURGE_STATUS_NOT_RUN,
     ) -> dict[str, Any]:
         """Shape a typed :class:`AgentResult` + reports into the on-disk schema.
 
@@ -1381,6 +1411,7 @@ class DefaultEvalHarness(Harness):
                 "artifact_collection": self._artifact_collection_field(
                     artifact_collection_failures, attempted=True
                 ),
+                "task_dir_purge_status": task_dir_purge_status,
             }
         )
         return record
@@ -1398,6 +1429,7 @@ class DefaultEvalHarness(Harness):
         verification_status: str = "not_evaluated",
         artifact_collection_failures: list[dict[str, str]] | None = None,
         artifact_collection_attempted: bool = False,
+        task_dir_purge_status: str = _PURGE_STATUS_NOT_RUN,
     ) -> dict[str, Any]:
         """Build a failed-task record so the failure stays visible.
 
@@ -1433,6 +1465,9 @@ class DefaultEvalHarness(Harness):
                 record's ``artifact_collection`` is not misread as "never
                 ran" when it actually ran and failed, or as "complete" when
                 it never ran at all.
+            task_dir_purge_status: One of the ``_PURGE_STATUS_*`` constants;
+                defaults to "not_run" for the common case where the
+                exception aborted the task before ``_purge_task_dir`` ran.
         """
         error_text = str(exc)
         record = self._empty_record(task)
@@ -1458,6 +1493,7 @@ class DefaultEvalHarness(Harness):
                 "artifact_collection": self._artifact_collection_field(
                     artifact_collection_failures, attempted=artifact_collection_attempted
                 ),
+                "task_dir_purge_status": task_dir_purge_status,
             }
         )
         return record
@@ -1559,6 +1595,12 @@ class DefaultEvalHarness(Harness):
             # Only tasks vetted as correct promote to the leaderboard; downstream
             # ingest gates inclusion on this flag (default False until vetted).
             "validated": task.validated,
+            # Overwritten by _build_success_record / _build_failed_record with the
+            # real outcome of _purge_task_dir; this seed value is only ever kept
+            # if a record is somehow built without going through either builder,
+            # which honestly reads as "the purge never ran" rather than omitting
+            # the key (see _PURGE_STATUS_NOT_RUN).
+            "task_dir_purge_status": _PURGE_STATUS_NOT_RUN,
         }
 
     def _drain_scenario(

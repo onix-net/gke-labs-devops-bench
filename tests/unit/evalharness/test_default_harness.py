@@ -80,9 +80,10 @@ def test_purge_task_dir_deletes_the_task_directory(isolated_env: None, tmp_path:
     )
     task = Task(id="b-0001", task_dir=str(task_dir))
 
-    harness._purge_task_dir(task)  # noqa: SLF001
+    status = harness._purge_task_dir(task)  # noqa: SLF001
 
     assert not task_dir.exists()
+    assert status == harness_default._PURGE_STATUS_PURGED  # noqa: SLF001
 
 
 def test_purge_task_dir_respects_bench_keep_task_dir(
@@ -97,9 +98,10 @@ def test_purge_task_dir_respects_bench_keep_task_dir(
     )
     task = Task(id="b-0001", task_dir=str(task_dir))
 
-    harness._purge_task_dir(task)  # noqa: SLF001
+    status = harness._purge_task_dir(task)  # noqa: SLF001
 
     assert task_dir.exists()
+    assert status == harness_default._PURGE_STATUS_KEPT_ENV_OVERRIDE  # noqa: SLF001
 
 
 def test_purge_task_dir_refuses_a_path_outside_tasks_root(
@@ -114,10 +116,11 @@ def test_purge_task_dir_refuses_a_path_outside_tasks_root(
     task = Task(id="b-0001", task_dir=str(outside_dir))
 
     with caplog.at_level(logging.WARNING):
-        harness._purge_task_dir(task)  # noqa: SLF001
+        status = harness._purge_task_dir(task)  # noqa: SLF001
 
     assert outside_dir.exists()
     assert "not under tasks root" in caplog.text
+    assert status == harness_default._PURGE_STATUS_REFUSED_OUTSIDE_TASKS_ROOT  # noqa: SLF001
 
 
 def test_purge_task_dir_skips_and_warns_when_path_missing(
@@ -131,9 +134,10 @@ def test_purge_task_dir_skips_and_warns_when_path_missing(
     task = Task(id="b-0001", task_dir=str(missing_dir))
 
     with caplog.at_level(logging.WARNING):
-        harness._purge_task_dir(task)  # noqa: SLF001
+        status = harness._purge_task_dir(task)  # noqa: SLF001
 
     assert "does not exist" in caplog.text
+    assert status == harness_default._PURGE_STATUS_ALREADY_MISSING  # noqa: SLF001
 
 
 def test_purge_task_dir_no_op_when_task_dir_unset(isolated_env: None) -> None:
@@ -141,7 +145,32 @@ def test_purge_task_dir_no_op_when_task_dir_unset(isolated_env: None) -> None:
     harness = DefaultEvalHarness(project_id="p", cluster_name="c")
     task = Task(id="b-0001")
 
-    harness._purge_task_dir(task)  # noqa: SLF001
+    status = harness._purge_task_dir(task)  # noqa: SLF001
+
+    assert status == harness_default._PURGE_STATUS_NO_TASK_DIR  # noqa: SLF001
+
+
+def test_purge_task_dir_reports_failed_on_os_error(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: Any
+) -> None:
+    """An ``OSError`` during ``rmtree`` is reported as failed, and logged, not raised."""
+    task_dir = tmp_path / "tasks" / "b-0001"
+    task_dir.mkdir(parents=True)
+    harness = DefaultEvalHarness(
+        project_id="p", cluster_name="c", tasks_root=str(tmp_path / "tasks")
+    )
+    task = Task(id="b-0001", task_dir=str(task_dir))
+    monkeypatch.setattr(
+        harness_default.shutil,
+        "rmtree",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("permission denied")),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        status = harness._purge_task_dir(task)  # noqa: SLF001
+
+    assert status == harness_default._PURGE_STATUS_FAILED  # noqa: SLF001
+    assert "failed to purge task directory" in caplog.text
 
 
 def test_drain_scenario_stamps_timed_out_when_thread_still_alive(
@@ -1004,6 +1033,7 @@ _RESULTS_JSON_REQUIRED_KEYS: frozenset[str] = frozenset(
         "generation_only",
         "validated",
         "artifact_collection",
+        "task_dir_purge_status",
     }
 )
 
@@ -1075,6 +1105,46 @@ def test_failed_record_keys_match_golden(isolated_env: None) -> None:
     assert record["status"] == "failed"
     assert record["error"] == "deployer.up() failed"
     assert record["errors"] == ["deployer.up() failed"]
+
+
+def test_success_record_defaults_task_dir_purge_status_to_not_run(isolated_env: None) -> None:
+    """A caller that omits the outcome (e.g. never reached the purge) reads as 'not_run'."""
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+    record = harness._build_success_record(  # noqa: SLF001
+        task=_stub_task(),
+        prompt="resolved prompt",
+        expected_output="resolved expected",
+        agent_res=_stub_agent_result(),
+        chaos_report={},
+        perf_report={},
+    )
+    assert record["task_dir_purge_status"] == harness_default._PURGE_STATUS_NOT_RUN  # noqa: SLF001
+
+
+def test_success_record_carries_the_purge_outcome(isolated_env: None) -> None:
+    """The purge outcome threads through into the success record verbatim."""
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+    record = harness._build_success_record(  # noqa: SLF001
+        task=_stub_task(),
+        prompt="resolved prompt",
+        expected_output="resolved expected",
+        agent_res=_stub_agent_result(),
+        chaos_report={},
+        perf_report={},
+        task_dir_purge_status=harness_default._PURGE_STATUS_FAILED,  # noqa: SLF001
+    )
+    assert record["task_dir_purge_status"] == harness_default._PURGE_STATUS_FAILED  # noqa: SLF001
+
+
+def test_failed_record_carries_the_purge_outcome(isolated_env: None) -> None:
+    """The purge outcome threads through into the failed record verbatim."""
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+    record = harness._build_failed_record(  # noqa: SLF001
+        _stub_task(),
+        RuntimeError("boom"),
+        task_dir_purge_status=harness_default._PURGE_STATUS_PURGED,  # noqa: SLF001
+    )
+    assert record["task_dir_purge_status"] == harness_default._PURGE_STATUS_PURGED  # noqa: SLF001
 
 
 def test_success_and_failed_records_have_identical_top_level_keys(isolated_env: None) -> None:

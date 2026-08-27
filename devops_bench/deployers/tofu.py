@@ -120,10 +120,14 @@ def _isolated_work_dir(stack_dir: str, tf_root: Path) -> str:
     both still ran ``tofu`` in the *shared* ``tf/prebuilt/<stack>`` directory, so
     two concurrent runs of the SAME stack contend on its ``.terraform.lock.hcl``
     (no lock file is committed, so every ``init`` rewrites it). To give each run a
-    private working directory, copy the WHOLE ``tf_root`` tree — stacks reference
-    modules via relative ``../../`` paths, so a leaf-only copy would break — into
-    the run's scratch dir (the parent of ``TF_DATA_DIR``, beside the per-run
-    state file) and run tofu in the copied stack.
+    private working directory, copy just the running task's own stack dir plus
+    the shared ``tf_root/modules`` tree that stacks reference via relative
+    ``../../modules/...`` paths, into the run's scratch dir (the parent of
+    ``TF_DATA_DIR``, beside the per-run state file), preserving the same
+    relative layout so those references keep resolving, and run tofu in the
+    copied stack. This deliberately excludes every OTHER stack under
+    ``tf_root`` (e.g. sibling ``tf/prebuilt/<task>`` dirs), which would
+    otherwise expose their seeding scripts to the agent running in this stack.
 
     Only applies to stacks under ``tf_root`` (the checkout's ``tf/`` or a
     ``BENCH_TF_ROOT`` override) during an isolated (parallel) run; external or
@@ -134,13 +138,15 @@ def _isolated_work_dir(stack_dir: str, tf_root: Path) -> str:
     tf_data_dir = os.environ.get("TF_DATA_DIR")
     if not tf_data_dir or not tf_data_dir.strip():
         return stack_dir
+    resolved_tf_root = tf_root.resolve()
+    resolved_stack_dir = Path(stack_dir).resolve()
     try:
-        rel = Path(stack_dir).resolve().relative_to(tf_root.resolve())
+        rel = resolved_stack_dir.relative_to(resolved_tf_root)
     except ValueError:
         return stack_dir  # external/absolute stack: cannot relocate safely
     run_dir = Path(tf_data_dir).resolve().parent
     dest_tf = run_dir / "tf"
-    if dest_tf.is_relative_to(tf_root.resolve()):
+    if dest_tf.is_relative_to(resolved_tf_root):
         # Copying a tree into its own descendant recurses (each level's scandir
         # sees the partial copy created one level up) until the OS path-length
         # limit aborts it. Refuse and keep the shared dir instead.
@@ -152,9 +158,13 @@ def _isolated_work_dir(stack_dir: str, tf_root: Path) -> str:
             stack_dir,
         )
         return stack_dir
+    dest_stack = dest_tf / rel
+    modules_src = resolved_tf_root / "modules"
     try:
-        shutil.copytree(tf_root, dest_tf, dirs_exist_ok=True)
-        return str(dest_tf / rel)
+        shutil.copytree(resolved_stack_dir, dest_stack, dirs_exist_ok=True)
+        if modules_src.is_dir():
+            shutil.copytree(modules_src, dest_tf / "modules", dirs_exist_ok=True)
+        return str(dest_stack)
     except OSError as exc:
         _log.warning(
             "could not isolate tofu stack dir (%s); falling back to shared %s",

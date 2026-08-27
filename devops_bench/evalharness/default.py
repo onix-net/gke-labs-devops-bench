@@ -20,6 +20,7 @@ import datetime
 import importlib
 import json
 import re
+import shutil
 import threading
 import time
 from dataclasses import replace
@@ -244,6 +245,11 @@ class DefaultEvalHarness(Harness):
             ``TARGET_DEPLOYMENT_NAME`` is unset.
         default_namespace: Fallback namespace used for the same two purposes
             when ``NAMESPACE`` is unset.
+        tasks_root: The tasks directory the run's tasks were loaded from,
+            used only to sanity-check the per-task directory purge in
+            :meth:`_purge_task_dir` before deleting anything. ``None`` when
+            unknown (e.g. tasks were loaded from a single spec file), in
+            which case that check is skipped.
     """
 
     def __init__(
@@ -259,11 +265,13 @@ class DefaultEvalHarness(Harness):
         agent_type: str | None = None,
         no_infra: bool | None = None,
         no_teardown: bool | None = None,
+        tasks_root: str | None = None,
     ) -> None:
         self.project_id = project_id
         self.cluster_name = cluster_name
         self._judge_model = judge_model
         self.results_root = results_root
+        self._tasks_root = Path(tasks_root).resolve() if tasks_root else None
         resolved_agent_type = (
             agent_type
             if agent_type is not None
@@ -787,6 +795,52 @@ class DefaultEvalHarness(Harness):
 
     # -- agent execution --------------------------------------------------
 
+    def _purge_task_dir(self, task: Task) -> None:
+        """Delete the task's on-disk directory before the agent's turn.
+
+        The task directory holds ``GRADING.md`` (explicit answer material),
+        ``controls/oracle.sh`` (the executable answer key), and ``task.yaml``
+        (the verification spec) alongside the agent-facing setup assets.
+        Solver agents were reading these off the executor filesystem and
+        scoring themselves against the answer key. This purge is only safe
+        because the full task spec (prompt, verification_spec, chaos_spec,
+        etc.) is parsed into the in-memory ``Task`` up front by the loader,
+        well before the agent's turn, and nothing downstream re-reads the
+        directory.
+
+        Time-of-check boundary: correct only because exactly one task runs
+        at a time per VM. If tasks ever run concurrently on a shared
+        filesystem, this needs to isolate per-task copies instead of
+        deleting shared source out from under a sibling run.
+
+        Controlled by ``BENCH_KEEP_TASK_DIR`` (default: purge). Set truthy
+        to keep the directory around for local debugging.
+        """
+        if get_bool("BENCH_KEEP_TASK_DIR"):
+            return
+        if not task.task_dir:
+            return
+        task_dir = Path(task.task_dir).resolve()
+        if not task_dir.exists():
+            _log.warning("task directory to purge does not exist, skipping: %s", task_dir)
+            return
+        if self._tasks_root is not None and (
+            task_dir == self._tasks_root or self._tasks_root not in task_dir.parents
+        ):
+            _log.warning(
+                "task directory %s is not under tasks root %s, refusing to delete",
+                task_dir,
+                self._tasks_root,
+            )
+            return
+        try:
+            shutil.rmtree(task_dir)
+        except OSError as exc:
+            # A failed purge must not abort the run (the agent's turn still
+            # has to happen), but it does mean the leak this exists to close
+            # stays open, so it is logged at warning level rather than swallowed.
+            _log.warning("failed to purge task directory %s: %s", task_dir, exc)
+
     def execute_agent(self, prompt: str, ctx: RunContext) -> AgentResult:
         """Run the configured agent against ``prompt`` through the registry.
 
@@ -1071,6 +1125,11 @@ class DefaultEvalHarness(Harness):
             ]
             safeguard_monitor = SafeguardMonitor(safeguard_hold_entries)
             safeguard_monitor.start()
+
+            # Remove the task's on-disk directory now, so the agent's turn
+            # cannot read the answer key off the executor filesystem. See
+            # ``_purge_task_dir`` for why this is safe at this point.
+            self._purge_task_dir(task)
 
             _log.info("executing agent for prompt: %s", prompt)
             before_files = snapshot_dir(workspace_path)

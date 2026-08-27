@@ -215,6 +215,7 @@ def test_to_dict_roundtrip_fields():
         "id",
         "name",
         "folder",
+        "task_dir",
         "prompt",
         "expected_output",
         "retrieval_context",

@@ -116,6 +116,10 @@ class Task(BaseModel):
         name: Human-readable task name (the ``name:`` field from the spec).
         folder: Name of the directory the task spec was loaded from; ``""`` when
             the source is not a directory-backed spec.
+        task_dir: Absolute path of the directory the task spec was loaded from;
+            ``""`` when the source is not a directory-backed spec (e.g. a
+            single spec file). Retained so the harness can locate the task's
+            on-disk directory after load time without reconstructing it.
         prompt: Instruction text driving the agent.
         expected_output: Reference output the result is judged against.
         retrieval_context: Supporting passages for retrieval-based scoring.
@@ -139,6 +143,7 @@ class Task(BaseModel):
     id: str = ""
     name: str = ""
     folder: str = ""
+    task_dir: str = ""
     prompt: str = ""
     expected_output: str = ""
     retrieval_context: list[str] = Field(default_factory=list)
@@ -164,6 +169,7 @@ class Task(BaseModel):
                 "id": "",
                 "name": "",
                 "folder": "",
+                "task_dir": "",
                 "prompt": "",
                 "expected_output": "",
                 "retrieval_context": [],
@@ -175,7 +181,14 @@ class Task(BaseModel):
         )
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any], *, name_default: str = "", folder: str = "") -> "Task":
+    def from_dict(
+        cls,
+        raw: dict[str, Any],
+        *,
+        name_default: str = "",
+        folder: str = "",
+        task_dir: str = "",
+    ) -> "Task":
         """Build a task from a parsed spec mapping, validating types strictly.
 
         Adapts the source naming before validation: ``task_id`` is accepted as an
@@ -188,6 +201,8 @@ class Task(BaseModel):
             name_default: Name used when the mapping omits ``name``.
             folder: Directory name the spec was loaded from, recorded on
                 :attr:`folder`.
+            task_dir: Absolute directory path the spec was loaded from,
+                recorded on :attr:`task_dir`.
 
         Returns:
             The validated task.
@@ -215,6 +230,7 @@ class Task(BaseModel):
                 "id": "" if raw_id is None else _text(str(raw_id)),
                 "name": _text(name_default if name is None else name),
                 "folder": folder,
+                "task_dir": task_dir,
                 "prompt": _text(prompt),
                 "expected_output": _text(raw.get("expected_output", "")),
                 # An empty YAML block (``key:`` with no value) parses to None;

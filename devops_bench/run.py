@@ -197,6 +197,7 @@ def run_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
             agent_type=config.agent_type,
             no_infra=config.no_infra,
             no_teardown=config.no_teardown,
+            tasks_root=config.source,
         )
         results = harness.run(tasks)
 

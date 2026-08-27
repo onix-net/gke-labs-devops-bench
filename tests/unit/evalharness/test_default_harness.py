@@ -70,6 +70,80 @@ def test_parse_chaos_specs_raises_on_malformed_json(isolated_env: None) -> None:
         harness._parse_chaos_specs("{not valid json", "cluster")  # noqa: SLF001
 
 
+def test_purge_task_dir_deletes_the_task_directory(isolated_env: None, tmp_path: Path) -> None:
+    """The task directory is gone once the purge runs, by default."""
+    task_dir = tmp_path / "tasks" / "b-0001"
+    task_dir.mkdir(parents=True)
+    (task_dir / "task.yaml").write_text("id: b-0001")
+    harness = DefaultEvalHarness(
+        project_id="p", cluster_name="c", tasks_root=str(tmp_path / "tasks")
+    )
+    task = Task(id="b-0001", task_dir=str(task_dir))
+
+    harness._purge_task_dir(task)  # noqa: SLF001
+
+    assert not task_dir.exists()
+
+
+def test_purge_task_dir_respects_bench_keep_task_dir(
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``BENCH_KEEP_TASK_DIR`` opts out of the purge for local debugging."""
+    task_dir = tmp_path / "tasks" / "b-0001"
+    task_dir.mkdir(parents=True)
+    monkeypatch.setenv("BENCH_KEEP_TASK_DIR", "1")
+    harness = DefaultEvalHarness(
+        project_id="p", cluster_name="c", tasks_root=str(tmp_path / "tasks")
+    )
+    task = Task(id="b-0001", task_dir=str(task_dir))
+
+    harness._purge_task_dir(task)  # noqa: SLF001
+
+    assert task_dir.exists()
+
+
+def test_purge_task_dir_refuses_a_path_outside_tasks_root(
+    isolated_env: None, tmp_path: Path, caplog: Any
+) -> None:
+    """A ``task_dir`` outside the known tasks root is logged and skipped, not deleted."""
+    tasks_root = tmp_path / "tasks"
+    tasks_root.mkdir()
+    outside_dir = tmp_path / "elsewhere"
+    outside_dir.mkdir()
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c", tasks_root=str(tasks_root))
+    task = Task(id="b-0001", task_dir=str(outside_dir))
+
+    with caplog.at_level(logging.WARNING):
+        harness._purge_task_dir(task)  # noqa: SLF001
+
+    assert outside_dir.exists()
+    assert "not under tasks root" in caplog.text
+
+
+def test_purge_task_dir_skips_and_warns_when_path_missing(
+    isolated_env: None, tmp_path: Path, caplog: Any
+) -> None:
+    """A ``task_dir`` that no longer exists is logged at warning level, not raised."""
+    tasks_root = tmp_path / "tasks"
+    tasks_root.mkdir()
+    missing_dir = tasks_root / "b-0001"
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c", tasks_root=str(tasks_root))
+    task = Task(id="b-0001", task_dir=str(missing_dir))
+
+    with caplog.at_level(logging.WARNING):
+        harness._purge_task_dir(task)  # noqa: SLF001
+
+    assert "does not exist" in caplog.text
+
+
+def test_purge_task_dir_no_op_when_task_dir_unset(isolated_env: None) -> None:
+    """A task with no recorded ``task_dir`` (e.g. loaded from a single spec file) is a no-op."""
+    harness = DefaultEvalHarness(project_id="p", cluster_name="c")
+    task = Task(id="b-0001")
+
+    harness._purge_task_dir(task)  # noqa: SLF001
+
+
 def test_drain_scenario_stamps_timed_out_when_thread_still_alive(
     isolated_env: None,
     monkeypatch: pytest.MonkeyPatch,

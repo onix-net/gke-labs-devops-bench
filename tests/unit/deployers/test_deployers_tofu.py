@@ -296,6 +296,36 @@ def test_init_isolates_stack_under_bench_tf_root(
     assert Path(deployer.tf_dir) == root.resolve() / "my-stack"
 
 
+def test_init_isolates_only_the_running_stack_and_shared_modules(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: StubProvider
+) -> None:
+    """The private copy holds only the running stack, not sibling stacks.
+
+    ``tf_root`` here mirrors the real layout: several ``prebuilt/<stack>``
+    dirs plus a shared ``modules/`` tree. Only the stack actually being run
+    (and ``modules/``) should exist in the per-run copy, so an agent running
+    in this stack cannot read another task's seeding script.
+    """
+    root = tmp_path / "stacks"
+    (root / "prebuilt" / "my-stack").mkdir(parents=True)
+    (root / "prebuilt" / "my-stack" / "main.tf").write_text("# my-stack")
+    (root / "prebuilt" / "other-stack").mkdir(parents=True)
+    (root / "prebuilt" / "other-stack" / "main.tf").write_text("# other-stack")
+    (root / "modules" / "cluster").mkdir(parents=True)
+    (root / "modules" / "cluster" / "main.tf").write_text("# module")
+    run_dir = tmp_path / "run"
+    monkeypatch.setenv("BENCH_TF_ROOT", str(root))
+    monkeypatch.setenv("TF_DATA_DIR", str(run_dir / "tf-data"))
+
+    deployer = TFDeployer(tf_dir="prebuilt/my-stack", provider=provider)
+
+    dest_tf = run_dir.resolve() / "tf"
+    assert Path(deployer.work_dir) == dest_tf / "prebuilt" / "my-stack"
+    assert (dest_tf / "prebuilt" / "my-stack" / "main.tf").exists()
+    assert (dest_tf / "modules" / "cluster" / "main.tf").exists()
+    assert not (dest_tf / "prebuilt" / "other-stack").exists()
+
+
 def test_isolation_refused_when_root_contains_scratch_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: StubProvider, caplog: Any
 ) -> None:

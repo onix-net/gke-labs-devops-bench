@@ -60,13 +60,17 @@ def _sort_key(task: Task) -> tuple[int, int | str]:
     return (0, int(text)) if text.isdigit() else (1, text)
 
 
-def _load_yaml_task(path: Path, name_default: str, folder: str = "") -> Task | None:
+def _load_yaml_task(
+    path: Path, name_default: str, folder: str = "", task_dir: str = ""
+) -> Task | None:
     """Read one YAML spec file into a Task, or None if it is not a mapping.
 
     Args:
         path: Path to the YAML spec file.
         name_default: Fallback name used when the spec omits one.
         folder: Directory name recorded on the task's :attr:`~Task.folder`.
+        task_dir: Absolute directory path recorded on the task's
+            :attr:`~Task.task_dir`.
 
     Returns:
         The parsed task, or ``None`` when the document is not a mapping.
@@ -74,7 +78,7 @@ def _load_yaml_task(path: Path, name_default: str, folder: str = "") -> Task | N
     content = safe_parse_yaml(path.read_text(encoding="utf-8"))
     if not isinstance(content, dict):
         return None
-    return Task.from_dict(content, name_default=name_default, folder=folder)
+    return Task.from_dict(content, name_default=name_default, folder=folder, task_dir=task_dir)
 
 
 def load_from_tasks_dir(dir_path: str) -> list[Task]:
@@ -109,7 +113,12 @@ def load_from_tasks_dir(dir_path: str) -> list[Task]:
 
         yaml_path = current / _TASK_FILE
         try:
-            task = _load_yaml_task(yaml_path, name_default=current.name, folder=current.name)
+            task = _load_yaml_task(
+                yaml_path,
+                name_default=current.name,
+                folder=current.name,
+                task_dir=str(current.resolve()),
+            )
             if task is not None:
                 if task.id and task.id in seen_ids:
                     _log.warning("duplicate task id %r at %s", task.id, yaml_path)

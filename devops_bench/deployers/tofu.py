@@ -196,7 +196,18 @@ def _lock_down_copied_tree(root: Path) -> None:
     """
     root.chmod(0o700)
     for path in root.rglob("*"):
-        path.chmod(0o700 if path.is_dir() else 0o600)
+        if path.is_dir():
+            path.chmod(0o700)
+        else:
+            # Keep the execute bit for files that had one: a stack whose
+            # provisioner runs `./scripts/setup.sh` needs it, and exec()
+            # requires an x bit even for root, so 0600 here fails the
+            # provisioner with exit 126 "Permission denied" (measured
+            # 2026-08-27 on a prebuilt stack under per-run isolation).
+            # 0o700 is exactly as private as 0o600 to any other uid, so
+            # the lockdown's answer-key goal is unchanged.
+            executable = bool(path.stat().st_mode & 0o111)
+            path.chmod(0o700 if executable else 0o600)
 
 
 class TFDeployer(Deployer):

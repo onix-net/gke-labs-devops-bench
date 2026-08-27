@@ -46,3 +46,50 @@ module "kind" {
   pod_subnet          = var.pod_subnet
 }
 
+
+module "vcluster" {
+  source = "./vcluster"
+  count  = var.infra_provider == "vcluster" ? 1 : 0
+
+  cluster_name = var.cluster_name
+  location     = var.location != "" ? var.location : "local"
+  # Unique host namespace per virtual cluster; the module's static default
+  # collides when two vclusters share one host.
+  namespace = "vcluster-${var.cluster_name}"
+
+  host_kubecontext     = var.host_kubecontext
+  host_kubeconfig_path = var.host_kubeconfig_path
+  service_cidr         = var.vcluster_service_cidr
+}
+
+
+# vcluster delivers its kubeconfig only as the vc-<name> Secret on the host.
+# File-based consumers (the factory's controls scripts pass
+# -var kubeconfig_path=<tmp> and read that file) keep the same contract the
+# kind module provides: extract the secret to var.kubeconfig_path once the
+# module's own API-stability wait has passed.
+resource "terraform_data" "vcluster_kubeconfig_file" {
+  count      = var.infra_provider == "vcluster" ? 1 : 0
+  depends_on = [module.vcluster]
+
+  triggers_replace = {
+    cluster = var.cluster_name
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      set -e
+      ctx_flag=""
+      if [ -n "${var.host_kubecontext}" ]; then
+        ctx_flag="--context=${var.host_kubecontext}"
+      fi
+      out_path="${pathexpand(var.kubeconfig_path)}"
+      mkdir -p "$(dirname "$out_path")"
+      kubectl --kubeconfig="${pathexpand(var.host_kubeconfig_path)}" $ctx_flag \
+        -n "vcluster-${var.cluster_name}" get secret "vc-${var.cluster_name}" \
+        --template='{{.data.config}}' | base64 -d > "$out_path"
+      chmod 600 "$out_path"
+    EOT
+  }
+}

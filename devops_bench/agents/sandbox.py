@@ -232,15 +232,32 @@ def current_cluster_name() -> str | None:
     so rather than widen that interface we recover it from the context kind wrote:
     ``kind-<cluster>``. That is also exactly the prefix of the control-plane
     container name the container needs to reach, so the two stay consistent by
-    construction. Returns None for a non-kind context, which is the signal that
-    this sandbox's networking assumptions do not apply.
+    construction. A ``gke_<project>_<location>_<cluster>`` context (written by
+    ``gcloud get-credentials``) is returned whole: its API endpoint is already
+    reachable from a container, so no name-derived rewrite is needed and
+    :func:`build_agent_kubeconfig` branches on the prefix. Returns None for any
+    other context, which is the signal that this sandbox's networking
+    assumptions do not apply.
     """
     ctx = run(["kubectl", "config", "current-context"], check=False).stdout or ""
     ctx = ctx.strip()
-    if not ctx.startswith("kind-"):
-        _log.error("context %r is not a kind context; the docker-network sandbox assumes kind", ctx)
-        return None
-    return ctx[len("kind-") :]
+    if os.environ.get("BENCH_SANDBOX_STATIC_KUBECONFIG", "").strip().lower() in {"1", "true"}:
+        # Operator vouches the current kubeconfig is static (embedded certs or
+        # token, no exec plugin) and its endpoint is reachable from a
+        # container: vcluster's exported kubeconfig is the motivating case.
+        # build_agent_kubeconfig passes it through verbatim. The context NAME
+        # is irrelevant in this mode, and a vcluster per-run kubeconfig may
+        # not even set current-context, so never return None here.
+        return ctx or "static-kubeconfig"
+    if ctx.startswith("kind-"):
+        return ctx[len("kind-") :]
+    if ctx.startswith("gke_"):
+        return ctx
+    _log.error(
+        "context %r is neither a kind- nor a gke_ context; the docker sandbox supports only those",
+        ctx,
+    )
+    return None
 
 
 def _kubectl_json(*args: str) -> dict:
@@ -274,6 +291,26 @@ def build_agent_kubeconfig(cluster_name: str, dest_dir: Path) -> Path | None:
     Returns None when no kubeconfig could be built, in which case the caller
     should refuse to run rather than silently fall back to the host.
     """
+    if os.environ.get("BENCH_SANDBOX_STATIC_KUBECONFIG", "").strip().lower() in {"1", "true"}:
+        # No --minify: it requires a current-context, which a vcluster
+        # per-run kubeconfig may lack; the per-run file is single-cluster
+        # by construction, so the whole file is the right payload.
+        raw = run(
+            ["kubectl", "config", "view", "--raw", "--flatten", "-o", "yaml"],
+            check=False,
+        ).stdout
+        if not raw or "server:" not in raw:
+            _log.error("static kubeconfig passthrough requested but current context unreadable")
+            return None
+        path = dest_dir / "kubeconfig"
+        path.write_text(raw)
+        path.chmod(0o600)
+        _log.info(
+            "agent kubeconfig: static passthrough of context %r (vcluster-style; "
+            "the virtual cluster is the containment boundary)",
+            cluster_name,
+        )
+        return path
     ca = run(
         [
             "kubectl",
@@ -290,7 +327,30 @@ def build_agent_kubeconfig(cluster_name: str, dest_dir: Path) -> Path | None:
         _log.error("could not read cluster CA from the current context; refusing to sandbox")
         return None
 
-    server = f"https://{cluster_name}-control-plane:6443"
+    if cluster_name.startswith("gke_"):
+        # GKE: the context's own endpoint is externally reachable and its TLS
+        # certificate covers it, so reuse it verbatim; there is no docker-network
+        # rewrite to do.
+        server = (
+            run(
+                [
+                    "kubectl",
+                    "config",
+                    "view",
+                    "--raw",
+                    "--minify",
+                    "-o",
+                    "jsonpath={.clusters[0].cluster.server}",
+                ],
+                check=False,
+            ).stdout
+            or ""
+        ).strip()
+        if not server:
+            _log.error("could not read the API server endpoint from the current context")
+            return None
+    else:
+        server = f"https://{cluster_name}-control-plane:6443"
 
     sa_exists = (
         run(
@@ -299,6 +359,46 @@ def build_agent_kubeconfig(cluster_name: str, dest_dir: Path) -> Path | None:
         ).returncode
         == 0
     )
+
+    if not sa_exists and cluster_name.startswith("gke_"):
+        # On GKE there is no embeddable admin client certificate (the operator
+        # authenticates via an exec plugin the container does not have), so the
+        # kind admin-cert fallback below cannot apply. Mirror it in capability
+        # instead: provision the agent SA so the container boundary still does
+        # all the work, and say so loudly.
+        _log.warning(
+            "no ServiceAccount %s/%s on a GKE cluster: provisioning one with "
+            "cluster-admin. Seed one in the task's stack to scope it.",
+            AGENT_SA_NAMESPACE,
+            AGENT_SA_NAME,
+        )
+        run(["kubectl", "create", "namespace", AGENT_SA_NAMESPACE], check=False)
+        run(["kubectl", "-n", AGENT_SA_NAMESPACE, "create", "sa", AGENT_SA_NAME], check=False)
+        run(
+            [
+                "kubectl",
+                "create",
+                "clusterrolebinding",
+                f"{AGENT_SA_NAME}-admin",
+                "--clusterrole=cluster-admin",
+                # kubectl's --serviceaccount takes namespace:name (colon); a slash
+                # is rejected, and with check=False that rejection is silent --
+                # which produced a token bound to a permissionless SA (runs 1-2,
+                # 2026-08-20: 12x Forbidden, agent flailed to timeout).
+                f"--serviceaccount={AGENT_SA_NAMESPACE}:{AGENT_SA_NAME}",
+            ],
+            check=False,
+        )
+        sa_exists = (
+            run(
+                ["kubectl", "-n", AGENT_SA_NAMESPACE, "get", "sa", AGENT_SA_NAME],
+                check=False,
+            ).returncode
+            == 0
+        )
+        if not sa_exists:
+            _log.error("failed to provision the agent ServiceAccount on GKE; refusing to sandbox")
+            return None
 
     if sa_exists:
         token = run(
@@ -483,6 +583,13 @@ def wrap_argv(
         chown_back = f"trap 'chown -R {uid}:{gid} /workspace' EXIT; \"$@\""
         command = ["sh", "-c", chown_back, "--", *argv]
 
+    # The docker network to join. "kind" (the default) is the network kind
+    # creates, which is how the container reaches a kind API server. For an
+    # externally reachable endpoint (GKE), set BENCH_SANDBOX_NETWORK=default
+    # to omit the flag and use docker's default bridge egress.
+    sandbox_network = os.environ.get("BENCH_SANDBOX_NETWORK", "kind").strip()
+    network_flags = [] if sandbox_network in ("", "default") else ["--network", sandbox_network]
+
     return [
         # No -i. Keeping stdin open gives the agent an open, non-TTY stdin to block
         # on, and a headless `-p <prompt>` run never reads it. Combined with
@@ -492,8 +599,7 @@ def wrap_argv(
         "--rm",
         *name_flags,
         *owner_flags,
-        "--network",
-        "kind",
+        *network_flags,
         "--user",
         user_spec,
         "-v",

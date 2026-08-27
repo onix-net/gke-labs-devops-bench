@@ -14,11 +14,11 @@
 
 variable "infra_provider" {
   type        = string
-  description = "The target cloud provider (gcp, kind)"
+  description = "The target cloud provider (gcp, kind, vcluster)"
 
   validation {
-    condition     = contains(["gcp", "kind"], var.infra_provider)
-    error_message = "infra_provider must be one of: 'gcp', 'kind'."
+    condition     = contains(["gcp", "kind", "vcluster"], var.infra_provider)
+    error_message = "infra_provider must be one of: 'gcp', 'kind', 'vcluster'."
   }
 }
 
@@ -116,3 +116,21 @@ variable "pod_subnet" {
   default     = ""
 }
 
+
+variable "host_kubecontext" {
+  type        = string
+  description = "Kube context of the host cluster a virtual cluster runs inside (vcluster-only). Empty means the host kubeconfig's current context."
+  default     = ""
+}
+
+variable "host_kubeconfig_path" {
+  type        = string
+  description = "Path to the kubeconfig used to reach the vcluster host cluster (vcluster-only)"
+  default     = "~/.kube/config"
+}
+
+variable "vcluster_service_cidr" {
+  type        = string
+  description = "The host cluster's Service CIDR (vcluster-only). Required on hosts whose range differs from the Kubernetes default 10.96.0.0/12 (GKE does); without it synced Services fail IP allocation and no pod ever syncs."
+  default     = ""
+}

@@ -232,6 +232,22 @@ def test_oc_model_id_defaults_to_google() -> None:
     assert _oc_model_id(AgentConfig(model="gemini-2.5-pro")) == "google/gemini-2.5-pro"
 
 
+def test_build_openclaw_config_defaults_code_mode_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("BENCH_OPENCLAW_CODE_MODE", raising=False)
+    payload = _build_openclaw_config(AgentConfig(), ())
+    assert payload["tools"]["codeMode"] is False
+
+
+def test_build_openclaw_config_honors_code_mode_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BENCH_OPENCLAW_CODE_MODE", "1")
+    payload = _build_openclaw_config(AgentConfig(), ())
+    assert payload["tools"]["codeMode"] is True
+
+
 def test_build_local_command_quotes_inputs_and_passes_model_flag() -> None:
     cfg = AgentConfig(model="gemini-2.5-pro", provider="gemini")
     cmd = _build_local_command(cfg, "hi 'world'", "main", "/usr/local/bin/oc")
@@ -660,19 +676,21 @@ def test_execute_does_not_prepend_rules_when_empty(
 def test_build_openclaw_config_wraps_servers_under_mcp() -> None:
     """A launchable binding renders under the ``mcp.servers`` config path."""
     cfg = _build_openclaw_config(AgentConfig(), (McpBinding(name="gke", command=("gke-mcp",)),))
-    assert cfg == {"mcp": {"servers": {"gke": {"command": "gke-mcp"}}}}
+    assert cfg == {
+        "mcp": {"servers": {"gke": {"command": "gke-mcp"}}},
+        "tools": {"codeMode": False},
+    }
 
 
-def test_build_openclaw_config_empty_without_launchable_server_or_override() -> None:
-    """No MCP binding and a catalog-known model → empty config (caller skips)."""
-    assert _build_openclaw_config(AgentConfig(), ()) == {}
-    assert (
-        _build_openclaw_config(
-            AgentConfig(model="gemini-3.1-pro-preview"),
-            (McpBinding(name="b", command=(), tools=("t",)),),
-        )
-        == {}
-    )
+def test_build_openclaw_config_carries_only_code_mode_without_launchable_server_or_override() -> (
+    None
+):
+    """No MCP binding and a catalog-known model → only ``tools.codeMode``."""
+    assert _build_openclaw_config(AgentConfig(), ()) == {"tools": {"codeMode": False}}
+    assert _build_openclaw_config(
+        AgentConfig(model="gemini-3.1-pro-preview"),
+        (McpBinding(name="b", command=(), tools=("t",)),),
+    ) == {"tools": {"codeMode": False}}
 
 
 def test_build_openclaw_config_merges_mcp_and_model_override() -> None:
@@ -812,19 +830,26 @@ def test_execute_writes_mcp_servers_into_isolated_config(
     )
     OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"), capabilities=caps)).run("p")
     assert captured["cfg_path"], "OPENCLAW_CONFIG_PATH must be set when MCP is bound"
-    assert captured["config"] == {"mcp": {"servers": {"gke": {"command": "gke-mcp"}}}}
+    assert captured["config"] == {
+        "mcp": {"servers": {"gke": {"command": "gke-mcp"}}},
+        "tools": {"codeMode": False},
+    }
 
 
-def test_execute_writes_no_config_when_no_launchable_server(
+def test_execute_writes_code_mode_config_when_no_launchable_server(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """No command-bearing MCP binding and a catalog-known model → no isolated
-    config, env var unset."""
+    """No command-bearing MCP binding and a catalog-known model → the isolated
+    config still carries ``tools.codeMode``, so the env var is still set."""
     captured: dict = {}
 
     def fake_bash(cmd, **kwargs):
         env = kwargs.get("extra_env") or {}
-        captured["has_cfg"] = "OPENCLAW_CONFIG_PATH" in env
+        cfg_path = env.get("OPENCLAW_CONFIG_PATH")
+        captured["cfg_path"] = cfg_path
+        captured["config"] = (
+            json.loads(Path(cfg_path).read_text()) if cfg_path and Path(cfg_path).exists() else None
+        )
         return _make_subprocess_result(stdout="ok", returncode=0)
 
     _install_oc_run(monkeypatch, fake_bash, _empty_sessions_run)
@@ -838,7 +863,8 @@ def test_execute_writes_no_config_when_no_launchable_server(
             capabilities=caps,
         )
     ).run("p")
-    assert captured["has_cfg"] is False
+    assert captured["cfg_path"]
+    assert captured["config"] == {"tools": {"codeMode": False}}
 
 
 def test_execute_writes_model_override_config_without_mcp(

@@ -238,13 +238,23 @@ def _build_model_override(config: AgentConfig) -> dict:
     }
 
 
+def _code_mode_enabled() -> bool:
+    """Read ``BENCH_OPENCLAW_CODE_MODE``, defaulting to shell mode (False).
+
+    Parsed permissively: ``"1"``/``"true"``/``"yes"`` (any case) are truthy,
+    anything else, including an unset env var, is False.
+    """
+    raw = os.environ.get("BENCH_OPENCLAW_CODE_MODE", "")
+    return raw.strip().lower() in ("1", "true", "yes")
+
+
 def _build_openclaw_config(config: AgentConfig, mcp_servers: tuple[McpBinding, ...]) -> dict:
     """Assemble the isolated ``openclaw.json`` payload for a run.
 
-    Merges the two per-run config concerns the harness owns: command-bearing MCP
-    bindings (``mcp.servers``) and a catalog entry for a model openclaw doesn't
-    ship by default (``models``/``agents``; see :func:`_build_model_override`).
-    Their key spaces are disjoint, so either, both, or neither may be present.
+    Merges the per-run config concerns the harness owns: command-bearing MCP
+    bindings (``mcp.servers``), a catalog entry for a model openclaw doesn't
+    ship by default (``models``/``agents``; see :func:`_build_model_override`),
+    and the ``exec`` tool's shell/code mode (``tools.codeMode``).
 
     Args:
         config: Resolved :class:`AgentConfig` (drives the model-catalog entry).
@@ -252,13 +262,16 @@ def _build_openclaw_config(config: AgentConfig, mcp_servers: tuple[McpBinding, .
             bindings are skipped by :func:`build_mcp_servers`).
 
     Returns:
-        A config mapping, or an empty dict when there is neither a launchable MCP
-        binding nor a model needing a catalog entry (caller then skips the config
-        write and leaves ``OPENCLAW_CONFIG_PATH`` unset).
+        A config mapping. ``tools.codeMode`` is always present, so the payload
+        is never empty and the caller always writes ``openclaw.json``.
 
     Each MCP server entry inherits the run's ``KUBECONFIG`` (set by ``RunEnv``) as
     an explicit ``env`` so the MCP server (e.g. gke-mcp) reads the run-scoped
     cluster credentials directly instead of forcing the agent to re-fetch them.
+
+    ``tools.codeMode`` defaults to False (shell mode) so the ``exec`` tool takes
+    a plain shell command instead of JavaScript run in openclaw's code-mode
+    sandbox. Overridable with ``BENCH_OPENCLAW_CODE_MODE``.
     """
     payload: dict = {}
     servers = build_mcp_servers(mcp_servers)
@@ -269,6 +282,7 @@ def _build_openclaw_config(config: AgentConfig, mcp_servers: tuple[McpBinding, .
                 entry.setdefault("env", {})["KUBECONFIG"] = kubeconfig
         payload["mcp"] = {"servers": servers}
     payload.update(_build_model_override(config))
+    payload["tools"] = {"codeMode": _code_mode_enabled()}
     return payload
 
 
@@ -446,10 +460,9 @@ class OpenClawAgent(AgentHarness):
             env_overlay["OPENCLAW_STATE_DIR"] = str(state_dir)
 
             config_payload = _build_openclaw_config(self.config, caps.mcp_servers)
-            if config_payload:
-                config_path = workdir / _OPENCLAW_CONFIG_FILE
-                config_path.write_text(json.dumps(config_payload, indent=2))
-                env_overlay["OPENCLAW_CONFIG_PATH"] = str(config_path)
+            config_path = workdir / _OPENCLAW_CONFIG_FILE
+            config_path.write_text(json.dumps(config_payload, indent=2))
+            env_overlay["OPENCLAW_CONFIG_PATH"] = str(config_path)
 
             command = _build_local_command(self.config, final_prompt, self.agent_name, oc_bin)
 

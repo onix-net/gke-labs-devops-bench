@@ -32,6 +32,7 @@ __all__ = [
     "run",
     "run_as_agent",
     "resolve_agent_identity",
+    "chown_to_agent",
     "AgentIdentityError",
     "AGENT_UID",
     "AGENT_GID",
@@ -103,6 +104,37 @@ def resolve_agent_identity() -> tuple[int, int]:
             "refusing to run the solver agent as root instead"
         ) from exc
     return AGENT_UID, AGENT_GID
+
+
+def chown_to_agent(path: str | os.PathLike[str]) -> None:
+    """Recursively chown ``path`` (dirs and files) to AGENT_UID/AGENT_GID.
+
+    The harness hands the whole workspace to the agent uid before calling the
+    agent's own ``run()`` method, so anything created after that handoff
+    (e.g. an agent implementation's own per-run state directory, still built
+    while the process is root) is root-owned and unwritable by the
+    dropped-privilege agent process unless it is chowned explicitly. This is
+    that explicit handoff, callable from agent implementations themselves,
+    not only from the harness (mirrors the recursive-chown idiom in
+    ``devops_bench.evalharness.default._chown_tree``).
+
+    No-op when the calling process is not root: local/dev runs and tests do
+    not run as root, and ``os.chown`` would raise ``EPERM`` there.
+
+    Raises:
+        AgentIdentityError: If the benchagent uid/gid does not exist on this
+            host.
+        OSError: If any chown fails.
+    """
+    if os.geteuid() != 0:
+        return
+    uid, gid = resolve_agent_identity()
+    os.chown(path, uid, gid)
+    for root, dirs, files in os.walk(path):
+        for name in dirs:
+            os.chown(os.path.join(root, name), uid, gid)
+        for name in files:
+            os.chown(os.path.join(root, name), uid, gid)
 
 
 # redact() itself now lives in devops_bench.core.errors: SubprocessError's own

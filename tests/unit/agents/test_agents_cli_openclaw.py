@@ -929,6 +929,33 @@ def test_execute_isolates_state_dir_and_drops_global_session_wipe(
     assert "rm -rf" not in captured["cmd"]
 
 
+def test_execute_chowns_state_dir_and_config_to_agent_uid_before_run_as_agent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """state_dir and openclaw.json, both root-created after the workspace was
+    already chowned, are handed to the agent uid before run_as_agent drops
+    privilege, so oc can mkdir under a state dir it does not own."""
+    chowned: list[Path] = []
+    call_order: list[str] = []
+
+    def fake_chown_to_agent(path):
+        chowned.append(Path(path))
+        call_order.append("chown")
+
+    def fake_bash(cmd, **kwargs):
+        call_order.append("run_as_agent")
+        return _make_subprocess_result(stdout="ok", returncode=0)
+
+    monkeypatch.setattr(oc_mod, "chown_to_agent", fake_chown_to_agent)
+    _install_oc_run(monkeypatch, fake_bash, _empty_sessions_run)
+
+    OpenClawAgent(AgentConfig(target=str(tmp_path / "oc"))).run("p")
+
+    assert [p.name for p in chowned] == ["state", "openclaw.json"]
+    assert chowned[0].parent == chowned[1].parent
+    assert call_order == ["chown", "chown", "run_as_agent"]
+
+
 def test_execute_threads_api_key_into_subprocess_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

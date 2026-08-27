@@ -78,7 +78,7 @@ from devops_bench.agents.shared.signal_death import classify_returncode
 from devops_bench.core import SubprocessError, get_logger
 from devops_bench.core.errors import ConfigError
 from devops_bench.core.model_providers import resolve_provider
-from devops_bench.core.subprocess import run, run_as_agent
+from devops_bench.core.subprocess import chown_to_agent, run, run_as_agent
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only import
     from devops_bench.agents.capabilities import McpBinding
@@ -465,6 +465,16 @@ class OpenClawAgent(AgentHarness):
             env_overlay["OPENCLAW_CONFIG_PATH"] = str(config_path)
 
             command = _build_local_command(self.config, final_prompt, self.agent_name, oc_bin)
+
+            # The harness already chowned the workspace to the agent uid before
+            # calling this method, but state_dir/config_path were created just
+            # above, still as root, so they are root-owned again. oc itself
+            # needs to create subdirectories under state_dir (its own state/
+            # and tmp/), so that ownership has to be handed over explicitly
+            # before dropping to run_as_agent, or oc fails at startup with
+            # EACCES on its first mkdir.
+            chown_to_agent(state_dir)
+            chown_to_agent(config_path)
 
             # TODO(follow-up): on timeout this SIGKILLs only the bash child,
             # orphaning the oc/gcloud/kubectl/MCP process tree (which keeps

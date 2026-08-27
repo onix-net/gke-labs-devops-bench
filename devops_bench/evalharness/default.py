@@ -943,10 +943,17 @@ class DefaultEvalHarness(Harness):
         try:
             return agent.run(prompt, workspace_path=workspace_path)
         finally:
+            # Hand back to the identity the harness actually runs as, not
+            # literal root: on the root-orchestrated Linux path getuid() IS
+            # 0, and on an unprivileged host (macOS operator runs) a chown
+            # to 0:0 is EPERM even after a clean agent turn, which turned
+            # every otherwise-successful run into "failed" (measured
+            # 2026-08-27).
+            harness_uid, harness_gid = os.getuid(), os.getgid()
             if workspace_path is not None:
-                _chown_tree(workspace_path, 0, 0)
+                _chown_tree(workspace_path, harness_uid, harness_gid)
             if kubeconfig_present:
-                os.chown(kubeconfig_path, 0, 0)
+                os.chown(kubeconfig_path, harness_uid, harness_gid)
 
     # -- pipeline ---------------------------------------------------------
 

@@ -531,7 +531,7 @@ def test_execute_agent_chowns_workspace_and_kubeconfig_to_agent_uid(
         AGENTS._items.pop("fake-chown-probe", None)  # noqa: SLF001
 
 
-def test_execute_agent_chowns_back_to_root_after_the_agent_succeeds(
+def test_execute_agent_chowns_back_to_harness_identity_after_the_agent_succeeds(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Ownership is handed back to root once the agent's turn completes, so the
@@ -567,8 +567,8 @@ def test_execute_agent_chowns_back_to_root_after_the_agent_succeeds(
 
         harness.execute_agent("prompt", ctx)
 
-        assert chowned_trees[-1] == (workspace, 0, 0)
-        assert os_chowned[-1] == (kubeconfig, 0, 0)
+        assert chowned_trees[-1] == (workspace, os.getuid(), os.getgid())
+        assert os_chowned[-1] == (kubeconfig, os.getuid(), os.getgid())
     finally:
         AGENTS._items.pop("fake-chown-back-probe", None)  # noqa: SLF001
 
@@ -586,7 +586,7 @@ class _RaisingAgent(AgentHarness):
         raise RuntimeError("agent blew up")
 
 
-def test_execute_agent_chowns_back_to_root_even_when_the_agent_raises(
+def test_execute_agent_chowns_back_to_harness_identity_even_when_the_agent_raises(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A failing agent turn still hands ownership back to root: the chown-back
@@ -615,7 +615,7 @@ def test_execute_agent_chowns_back_to_root_even_when_the_agent_raises(
         result = harness.execute_agent("prompt", ctx)
 
         assert "agent blew up" in "".join(result.errors)
-        assert chowned_trees[-1] == (workspace, 0, 0)
+        assert chowned_trees[-1] == (workspace, os.getuid(), os.getgid())
     finally:
         AGENTS._items.pop("fake-chown-back-on-error-probe", None)  # noqa: SLF001
 

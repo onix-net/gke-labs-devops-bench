@@ -348,7 +348,7 @@ def test_build_env_resolves_provider_qualified_model_name():
 
 
 @mock.patch.object(pathlib.Path, "home")
-@mock.patch.object(devops_subprocess, "run")
+@mock.patch.object(devops_subprocess, "run_as_agent")
 def test_agy_cli_agent_execute_flow(mock_run, mock_home, tmp_path):
     # Mock Path.home() to return a temp directory to avoid polluting real HOME
     mock_home.return_value = tmp_path
@@ -425,7 +425,7 @@ def _write_sample_transcript(
 
 
 @mock.patch.object(pathlib.Path, "home")
-@mock.patch.object(devops_subprocess, "run")
+@mock.patch.object(devops_subprocess, "run_as_agent")
 def test_agy_cli_agent_execute_flow_nonzero_exit_records_error_and_metadata(
     mock_run, mock_home, tmp_path
 ):
@@ -452,7 +452,7 @@ def test_agy_cli_agent_execute_flow_nonzero_exit_records_error_and_metadata(
 
 
 @mock.patch.object(pathlib.Path, "home")
-@mock.patch.object(devops_subprocess, "run")
+@mock.patch.object(devops_subprocess, "run_as_agent")
 def test_agy_cli_agent_execute_flow_clean_exit_records_no_signal_death(
     mock_run, mock_home, tmp_path
 ):
@@ -477,7 +477,7 @@ def test_agy_cli_agent_execute_flow_clean_exit_records_no_signal_death(
 
 
 @mock.patch.object(pathlib.Path, "home")
-@mock.patch.object(devops_subprocess, "run")
+@mock.patch.object(devops_subprocess, "run_as_agent")
 def test_agy_cli_agent_execute_flow_ordinary_non_zero_exit_is_not_a_signal_death(
     mock_run, mock_home, tmp_path
 ):
@@ -506,7 +506,7 @@ def test_agy_cli_agent_execute_flow_ordinary_non_zero_exit_is_not_a_signal_death
 
 
 @mock.patch.object(pathlib.Path, "home")
-@mock.patch.object(devops_subprocess, "run")
+@mock.patch.object(devops_subprocess, "run_as_agent")
 def test_agy_cli_agent_execute_classifies_sigkill_exit_as_signal_death(
     mock_run, mock_home, tmp_path
 ):
@@ -539,7 +539,7 @@ def test_agy_cli_agent_execute_classifies_sigkill_exit_as_signal_death(
 
 
 @mock.patch.object(pathlib.Path, "home")
-@mock.patch.object(devops_subprocess, "run")
+@mock.patch.object(devops_subprocess, "run_as_agent")
 def test_agy_cli_agent_execute_classifies_sigterm_exit_as_signal_death(
     mock_run, mock_home, tmp_path
 ):
@@ -569,7 +569,7 @@ def test_agy_cli_agent_execute_classifies_sigterm_exit_as_signal_death(
 
 
 @mock.patch.object(pathlib.Path, "home")
-@mock.patch.object(devops_subprocess, "run")
+@mock.patch.object(devops_subprocess, "run_as_agent")
 def test_agy_cli_agent_execute_flow_missing_transcript_falls_back_to_stdout(
     mock_run, mock_home, tmp_path
 ):
@@ -762,7 +762,7 @@ def test_db_token_state_absent_for_missing_or_nonconversation_db(tmp_path):
 
 
 @mock.patch.object(pathlib.Path, "home")
-@mock.patch.object(devops_subprocess, "run")
+@mock.patch.object(devops_subprocess, "run_as_agent")
 def test_agy_cli_agent_execute_flow_timeout_recovers_partial_transcript(
     mock_run, mock_home, tmp_path
 ):
@@ -793,7 +793,7 @@ def test_agy_cli_agent_execute_flow_timeout_recovers_partial_transcript(
 
 
 @mock.patch.object(pathlib.Path, "home")
-@mock.patch.object(devops_subprocess, "run")
+@mock.patch.object(devops_subprocess, "run_as_agent")
 def test_agy_cli_agent_execute_reads_tokens_from_db(mock_run, mock_home, tmp_path):
     # Tokens (incl. cached) come from the conversation DB; output + trajectory
     # from the transcript.
@@ -829,7 +829,7 @@ def test_agy_cli_agent_execute_reads_tokens_from_db(mock_run, mock_home, tmp_pat
 
 
 @mock.patch.object(pathlib.Path, "home")
-@mock.patch.object(devops_subprocess, "run")
+@mock.patch.object(devops_subprocess, "run_as_agent")
 def test_agy_cli_agent_execute_falls_back_to_transcript_tokens(mock_run, mock_home, tmp_path):
     # DB has no usage but the (old-format) transcript carries per-record tokens:
     # fall back to those instead of reporting all-None.
@@ -866,7 +866,7 @@ def test_agy_cli_agent_execute_falls_back_to_transcript_tokens(mock_run, mock_ho
 
 
 @mock.patch.object(pathlib.Path, "home")
-@mock.patch.object(devops_subprocess, "run")
+@mock.patch.object(devops_subprocess, "run_as_agent")
 def test_agy_cli_agent_execute_emits_none_tokens_when_no_source(mock_run, mock_home, tmp_path):
     # No usage in the DB and a token-less (new-format) transcript -> all-None
     # (never a fabricated zero), flagged as unavailable.

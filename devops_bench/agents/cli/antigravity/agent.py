@@ -296,7 +296,11 @@ class AgyCliAgent(base.AgentHarness):
             completed: devops_subprocess.CompletedProcess | None = None
             timeout_exc: core.SubprocessError | None = None
             try:
-                completed = devops_subprocess.run(
+                # run_as_agent, not run: this is the solver agent's own turn,
+                # dropped to the unprivileged benchagent uid so it cannot
+                # read the fault injector under
+                # tf/prebuilt/<task>/scripts/setup.sh.
+                completed = devops_subprocess.run_as_agent(
                     argv,
                     extra_env=env_overlay,
                     cwd=workdir,

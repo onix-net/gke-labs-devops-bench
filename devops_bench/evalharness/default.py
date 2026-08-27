@@ -19,6 +19,7 @@ from __future__ import annotations
 import datetime
 import importlib
 import json
+import os
 import re
 import shutil
 import threading
@@ -46,6 +47,7 @@ from devops_bench.core import (
     mint_dir,
     remove_minted,
 )
+from devops_bench.core.subprocess import resolve_agent_identity
 from devops_bench.deployers.factory import get_deployer
 from devops_bench.evalharness.artifacts import collect_generated_files, snapshot_dir
 from devops_bench.evalharness.base import Harness
@@ -95,6 +97,30 @@ _AGENT_TYPE_ALIASES: dict[str, str] = {
 
 # Default agent type when neither --agent-type nor BENCH_AGENT_TYPE is set.
 _DEFAULT_AGENT_TYPE = "gemini-cli"
+
+
+def _chown_tree(path: Path, uid: int, gid: int) -> None:
+    """Recursively chown ``path`` (dirs and files) to ``uid:gid``.
+
+    Mirrors the recursive-chown idiom in
+    :func:`devops_bench.agents.sandbox.wrap_argv` (there, a shell ``chown -R``
+    hands a sandboxed container's ``/workspace`` back to the operator on
+    exit); this is the same handoff done in-process for the non-container uid
+    drop, in both directions: to AGENT_UID before the agent's turn so it can
+    write its own workspace, and back to root afterward so the harness can
+    read the results without a permission error.
+
+    Raises:
+        OSError: If any chown fails. Never swallowed: a workspace the agent
+            cannot write to, or that the harness cannot read back, must abort
+            the task rather than proceed silently degraded.
+    """
+    os.chown(path, uid, gid)
+    for root, dirs, files in os.walk(path):
+        for name in dirs:
+            os.chown(os.path.join(root, name), uid, gid)
+        for name in files:
+            os.chown(os.path.join(root, name), uid, gid)
 
 # Record-level ``status`` values for a run whose agent process itself never
 # completed cleanly (crashed, exited non-zero, or timed out). Distinct from
@@ -866,6 +892,22 @@ class DefaultEvalHarness(Harness):
     def execute_agent(self, prompt: str, ctx: RunContext) -> AgentResult:
         """Run the configured agent against ``prompt`` through the registry.
 
+        The agent's own process is dropped to the unprivileged benchagent
+        uid (see ``core.subprocess.run_as_agent``, used by each CLI
+        harness's spawn), but it still needs to write into its workspace and
+        read the cluster kubeconfig the CLI wrapper's own kubectl calls
+        depend on. Both are root-owned before this method runs (the
+        harness/tofu/kubectl path), so ownership is hand off to the agent
+        uid for the duration of the turn and handed back to root
+        afterward, mirroring the recursive chown-back idiom in
+        :func:`devops_bench.agents.sandbox.wrap_argv` (there via a shell
+        ``chown -R`` on container exit; here in-process via ``os.chown``,
+        since there is no container to run it in). Handing ownership back
+        is unconditional (``finally``): the post-agent pipeline
+        (``collect_generated_files``, verification's own kubectl calls)
+        still runs as root and would otherwise start hitting permission
+        errors on a workspace/kubeconfig left agent-owned.
+
         Args:
             prompt: The (placeholder-resolved) task prompt.
             ctx: The per-task run context. ``ctx.workspace_path`` is handed to
@@ -875,9 +917,36 @@ class DefaultEvalHarness(Harness):
 
         Returns:
             The typed :class:`AgentResult` the agent emitted.
+
+        Raises:
+            AgentIdentityError: If the benchagent uid/gid does not exist on
+                this host. Never falls back to running the agent as root.
+            OSError: If a chown fails, before or after the agent's turn.
         """
         agent = self.resolve_agent(self.agent_type)
-        return agent.run(prompt, workspace_path=ctx.workspace_path)
+        agent_uid, agent_gid = resolve_agent_identity()
+
+        workspace_path = ctx.workspace_path
+        kubeconfig_path = Path(ctx.kubeconfig_path) if ctx.kubeconfig_path else None
+        kubeconfig_present = kubeconfig_path is not None and kubeconfig_path.exists()
+
+        if workspace_path is not None:
+            _chown_tree(workspace_path, agent_uid, agent_gid)
+        if kubeconfig_present:
+            # Mode 0600, not 0640: the kubeconfig carries the cluster's
+            # client credential, and the agent uid is the only reader that
+            # needs it during the turn (root regains ownership, and with it
+            # read access, in the finally block below).
+            os.chown(kubeconfig_path, agent_uid, agent_gid)
+            kubeconfig_path.chmod(0o600)
+
+        try:
+            return agent.run(prompt, workspace_path=workspace_path)
+        finally:
+            if workspace_path is not None:
+                _chown_tree(workspace_path, 0, 0)
+            if kubeconfig_present:
+                os.chown(kubeconfig_path, 0, 0)
 
     # -- pipeline ---------------------------------------------------------
 

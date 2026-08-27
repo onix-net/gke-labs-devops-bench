@@ -16,7 +16,9 @@
 
 from __future__ import annotations
 
+import grp
 import os
+import pwd
 import subprocess
 import threading
 from collections.abc import Mapping, Sequence
@@ -26,11 +28,82 @@ from devops_bench.core.errors import SubprocessError
 from devops_bench.core.errors import redact as redact
 from devops_bench.core.logging import get_logger
 
-__all__ = ["run", "redact", "tag_current_thread", "CompletedProcess"]
+__all__ = [
+    "run",
+    "run_as_agent",
+    "resolve_agent_identity",
+    "AgentIdentityError",
+    "AGENT_UID",
+    "AGENT_GID",
+    "AGENT_USER",
+    "redact",
+    "tag_current_thread",
+    "CompletedProcess",
+]
 
 type CompletedProcess = subprocess.CompletedProcess[str]
 
 _log = get_logger("core.subprocess")
+
+# The unprivileged identity the solver agent runs as. Orchestration (tofu,
+# kubectl, gcloud, docker) stays on the privileged run() path above; only the
+# agent CLI's own process drops to this uid/gid. Deliberately not in the
+# docker group, so a compromised or malicious agent turn cannot reach the
+# Docker socket even if it finds one on the host.
+AGENT_UID = int(os.environ.get("BENCH_AGENT_UID", "2000"))
+AGENT_GID = int(os.environ.get("BENCH_AGENT_GID", "2000"))
+AGENT_USER = os.environ.get("BENCH_AGENT_USER", "benchagent")
+
+
+class AgentIdentityError(RuntimeError):
+    """Raised when the benchagent uid/gid the privilege drop needs is missing.
+
+    The failure policy for run_as_agent is to abort loudly rather than fall
+    back to running the agent as root: a silent fallback would reopen the
+    exact answer-key leak the drop exists to close, invisibly.
+    """
+
+
+def _agent_pwnam() -> pwd.struct_passwd:
+    """Resolve the benchagent passwd entry, or raise AgentIdentityError.
+
+    Raises:
+        AgentIdentityError: If AGENT_UID has no passwd entry on this host.
+    """
+    try:
+        return pwd.getpwuid(AGENT_UID)
+    except KeyError as exc:
+        raise AgentIdentityError(
+            f"user {AGENT_USER!r} (uid {AGENT_UID}) does not exist on this host; "
+            "refusing to run the solver agent as root instead"
+        ) from exc
+
+
+def resolve_agent_identity() -> tuple[int, int]:
+    """Confirm the benchagent uid/gid exist on this host and return them.
+
+    Shared between :func:`run_as_agent` (which needs the identity to spawn
+    the child) and callers that need to hand agent-owned files back and
+    forth around the agent's turn (e.g. chowning its workspace and
+    kubeconfig). Every caller gets the same fail-loud guarantee: this never
+    returns a fabricated identity for a uid/gid that does not actually exist.
+
+    Returns:
+        ``(AGENT_UID, AGENT_GID)``.
+
+    Raises:
+        AgentIdentityError: If either the user or the group is missing.
+    """
+    _agent_pwnam()
+    try:
+        grp.getgrgid(AGENT_GID)
+    except KeyError as exc:
+        raise AgentIdentityError(
+            f"group {AGENT_USER!r} (gid {AGENT_GID}) does not exist on this host; "
+            "refusing to run the solver agent as root instead"
+        ) from exc
+    return AGENT_UID, AGENT_GID
+
 
 # redact() itself now lives in devops_bench.core.errors: SubprocessError's own
 # message construction needs it too, and errors.py has no dependency on this
@@ -164,6 +237,134 @@ def run(
     return completed
 
 
+def _agent_child_env(
+    env: Mapping[str, str] | None,
+    extra_env: Mapping[str, str] | None,
+) -> dict[str, str]:
+    """Build the child env for run_as_agent: the usual overlay, plus HOME/USER/LOGNAME
+    repointed at benchagent's own home.
+
+    The agent turn sources nvm from ``$HOME``, so leaving HOME pointed at the
+    invoking (root) user's home would have the dropped-privilege child trying
+    to read root's home directory, which it cannot. AGENT_UID's own passwd
+    entry is the source of truth for its home dir, not a guess.
+
+    Raises:
+        AgentIdentityError: If AGENT_UID has no passwd entry on this host.
+    """
+    pw = _agent_pwnam()
+    built = _build_env(env, extra_env) or dict(os.environ)
+    built["HOME"] = pw.pw_dir
+    built["USER"] = pw.pw_name
+    built["LOGNAME"] = pw.pw_name
+    return built
+
+
+def run_as_agent(
+    cmd: Sequence[str | os.PathLike[str]],
+    *,
+    cwd: str | os.PathLike[str] | None = None,
+    env: Mapping[str, str] | None = None,
+    extra_env: Mapping[str, str] | None = None,
+    check: bool = True,
+    capture: bool = True,
+    text: bool = True,
+    timeout: float | None = None,
+    input: str | None = None,
+    stream: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    """Run a command as the unprivileged solver-agent identity (AGENT_UID/AGENT_GID).
+
+    Same contract as :func:`run`, with the same arguments and the same
+    return/raise behavior, except the child process drops from root to
+    AGENT_UID/AGENT_GID before exec, and HOME/USER/LOGNAME in the child env
+    are repointed at that user's own home (see :func:`_agent_child_env`). Use
+    this, never :func:`run`, for spawning the solver agent CLI itself;
+    everything else (tofu, kubectl, gcloud, docker) stays on :func:`run`.
+
+    Args:
+        cmd: Command and arguments as a sequence, never a shell string.
+        cwd: Working directory.
+        env: Full child environment; defaults to the parent's.
+        extra_env: Variables overlaid on ``env`` (or the parent environment).
+        check: Raise on a non-zero exit code.
+        capture: Capture stdout and stderr.
+        text: Decode output as text.
+        timeout: Seconds before terminating the command.
+        input: Data written to stdin.
+        stream: Log stdout and stderr line-by-line as they arrive, while still
+            returning the full captured text.
+
+    Returns:
+        The completed process.
+
+    Raises:
+        AgentIdentityError: If the benchagent uid/gid does not exist on this
+            host. Never falls back to running as root.
+        SubprocessError: If the command exits non-zero (when ``check``) or times out.
+        ValueError: If ``stream`` is set without ``text``.
+    """
+    uid, gid = resolve_agent_identity()
+    child_env = _agent_child_env(env, extra_env)
+
+    rendered = " ".join(str(arg) for arg in cmd)
+    tag = getattr(_thread_local, "tag", None)
+    prefix = f"running command [{tag}] as {AGENT_USER}:" if tag else f"running command as {AGENT_USER}:"
+    _log.debug("%s %s (cwd=%s)", prefix, redact(rendered), cwd or os.getcwd())
+
+    if stream:
+        if not text:
+            raise ValueError("stream=True requires text=True")
+        return _run_streamed(
+            cmd,
+            rendered=rendered,
+            cwd=cwd,
+            env=child_env,
+            check=check,
+            timeout=timeout,
+            input=input,
+            user=uid,
+            group=gid,
+        )
+
+    try:
+        completed = subprocess.run(
+            list(cmd),
+            cwd=cwd,
+            env=child_env,
+            capture_output=capture,
+            text=text,
+            timeout=timeout,
+            input=input,
+            # Same reasoning as _run_streamed: never let a child inherit the
+            # operator's terminal as stdin. `input=` manages stdin itself, so only
+            # override when there is none.
+            stdin=subprocess.DEVNULL if input is None else None,
+            check=False,
+            user=uid,
+            group=gid,
+        )
+    except subprocess.TimeoutExpired as exc:
+        _log.error("command timed out after %ss: %s", timeout, redact(rendered))
+        raise SubprocessError(
+            cmd,
+            returncode=-1,
+            stdout=_as_text(exc.stdout),
+            stderr=_as_text(exc.stderr),
+        ) from exc
+
+    if check and completed.returncode != 0:
+        _log.error("command exited with %s: %s", completed.returncode, redact(rendered))
+        raise SubprocessError(
+            cmd,
+            returncode=completed.returncode,
+            stdout=_as_text(completed.stdout),
+            stderr=_as_text(completed.stderr),
+        )
+
+    return completed
+
+
 def _pump(pipe: IO[str] | None, name: str, sink: list[str]) -> None:
     """Drain one pipe, logging every line as it arrives and buffering it for the caller.
 
@@ -188,6 +389,8 @@ def _run_streamed(
     check: bool,
     timeout: float | None,
     input: str | None,
+    user: int | None = None,
+    group: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a command, logging stdout/stderr line-by-line as it arrives.
 
@@ -195,6 +398,12 @@ def _run_streamed(
     captured text, and a non-zero exit or a timeout raises SubprocessError with
     whatever was collected before the process ended. The difference is purely that
     the caller sees output live rather than only on exit.
+
+    Args:
+        user: When set (by :func:`run_as_agent`), the uid the child drops to
+            before exec. ``None`` (the :func:`run` path) leaves the child
+            running as the calling process's own uid.
+        group: The gid paired with ``user``.
     """
     out_buf: list[str] = []
     err_buf: list[str] = []
@@ -203,6 +412,8 @@ def _run_streamed(
         list(cmd),
         cwd=cwd,
         env=env,
+        user=user,
+        group=group,
         # DEVNULL, never None. `None` makes the child INHERIT the harness's stdin,
         # which in an interactive run is the operator's terminal. A CLI agent that
         # finds an open, non-TTY stdin can sit reading it forever: observed with the

@@ -19,7 +19,9 @@ These exercise the wrapper against real, portable shell-free commands
 the standard library.
 """
 
+import grp
 import logging
+import pwd
 import sys
 import threading
 from pathlib import Path
@@ -194,3 +196,123 @@ def test_child_does_not_inherit_parent_stdin() -> None:
     )
     assert completed.returncode == 0
     assert "reached-eof" in completed.stdout
+
+
+def _fake_pwent(uid: int) -> pwd.struct_passwd:
+    return pwd.struct_passwd(
+        ("benchagent", "x", uid, uid, "", "/home/benchagent", "/bin/bash")
+    )
+
+
+def test_run_as_agent_passes_agent_uid_gid_to_subprocess(monkeypatch: pytest.MonkeyPatch):
+    """run_as_agent must spawn the child as AGENT_UID/AGENT_GID, never as the
+    caller's own (root) identity.
+    """
+    captured: dict = {}
+
+    def _fake_run(*args, **kwargs):
+        captured.update(kwargs)
+        return bench_subprocess.subprocess.CompletedProcess(
+            args=args[0], returncode=0, stdout="", stderr=""
+        )
+
+    monkeypatch.setattr(bench_subprocess.pwd, "getpwuid", lambda uid: _fake_pwent(uid))
+    monkeypatch.setattr(
+        bench_subprocess.grp, "getgrgid", lambda gid: grp.struct_group(("benchagent", "x", gid, []))
+    )
+    monkeypatch.setattr(bench_subprocess.subprocess, "run", _fake_run)
+
+    bench_subprocess.run_as_agent(["echo", "hi"], check=False)
+
+    assert captured["user"] == bench_subprocess.AGENT_UID
+    assert captured["group"] == bench_subprocess.AGENT_GID
+    assert captured["env"]["HOME"] == "/home/benchagent"
+    assert captured["env"]["USER"] == "benchagent"
+
+
+def test_run_as_agent_streamed_passes_agent_uid_gid_to_popen(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The streamed path (stream=True) must also drop privileges, not only
+    the buffered subprocess.run path.
+    """
+    captured: dict = {}
+    real_popen = bench_subprocess.subprocess.Popen
+
+    def _fake_popen(*args, **kwargs):
+        captured.update(kwargs)
+        # Swap in a real, harmless command so the rest of _run_streamed's
+        # pipe-pumping logic still has a live process to work with.
+        return real_popen([sys.executable, "-c", "print('hi')"], **{
+            k: v for k, v in kwargs.items() if k not in ("user", "group")
+        })
+
+    monkeypatch.setattr(bench_subprocess.pwd, "getpwuid", lambda uid: _fake_pwent(uid))
+    monkeypatch.setattr(
+        bench_subprocess.grp, "getgrgid", lambda gid: grp.struct_group(("benchagent", "x", gid, []))
+    )
+    monkeypatch.setattr(bench_subprocess.subprocess, "Popen", _fake_popen)
+
+    bench_subprocess.run_as_agent(["echo", "hi"], check=False, stream=True)
+
+    assert captured["user"] == bench_subprocess.AGENT_UID
+    assert captured["group"] == bench_subprocess.AGENT_GID
+
+
+def test_run_is_unchanged_by_run_as_agent(monkeypatch: pytest.MonkeyPatch):
+    """run() must never pass user=/group=, and must be unaffected by whatever
+    run_as_agent does: no privilege drop, no HOME/USER override.
+    """
+    captured: dict = {}
+
+    def _fake_run(*args, **kwargs):
+        captured.update(kwargs)
+        return bench_subprocess.subprocess.CompletedProcess(
+            args=args[0], returncode=0, stdout="", stderr=""
+        )
+
+    monkeypatch.setattr(bench_subprocess.subprocess, "run", _fake_run)
+
+    bench_subprocess.run(["echo", "hi"], check=False)
+
+    assert "user" not in captured
+    assert "group" not in captured
+    # env=None here means "inherit the parent's own environment unmodified",
+    # the pre-existing contract of run() with neither env nor extra_env set.
+    assert captured["env"] is None
+
+
+def test_run_as_agent_raises_when_agent_user_missing(monkeypatch: pytest.MonkeyPatch):
+    """Failure policy: a missing benchagent uid must raise, never silently
+    fall back to running the agent as root.
+    """
+    called = False
+
+    def _fake_run(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("subprocess.run must not be reached")
+
+    def _raise_keyerror(uid):
+        raise KeyError(uid)
+
+    monkeypatch.setattr(bench_subprocess.pwd, "getpwuid", _raise_keyerror)
+    monkeypatch.setattr(bench_subprocess.subprocess, "run", _fake_run)
+
+    with pytest.raises(bench_subprocess.AgentIdentityError, match="benchagent"):
+        bench_subprocess.run_as_agent(["echo", "hi"], check=False)
+
+    assert not called
+
+
+def test_run_as_agent_raises_when_agent_group_missing(monkeypatch: pytest.MonkeyPatch):
+    """Failure policy applies to the group lookup too, not only the user."""
+
+    def _raise_keyerror(gid):
+        raise KeyError(gid)
+
+    monkeypatch.setattr(bench_subprocess.pwd, "getpwuid", lambda uid: _fake_pwent(uid))
+    monkeypatch.setattr(bench_subprocess.grp, "getgrgid", _raise_keyerror)
+
+    with pytest.raises(bench_subprocess.AgentIdentityError, match="benchagent"):
+        bench_subprocess.resolve_agent_identity()

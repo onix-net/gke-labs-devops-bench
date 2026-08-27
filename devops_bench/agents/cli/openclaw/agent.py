@@ -78,7 +78,7 @@ from devops_bench.agents.shared.signal_death import classify_returncode
 from devops_bench.core import SubprocessError, get_logger
 from devops_bench.core.errors import ConfigError
 from devops_bench.core.model_providers import resolve_provider
-from devops_bench.core.subprocess import run
+from devops_bench.core.subprocess import run, run_as_agent
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only import
     from devops_bench.agents.capabilities import McpBinding
@@ -474,7 +474,10 @@ class OpenClawAgent(AgentHarness):
             try:
                 # bash -c (as argv, never shell=True) so nvm.sh can be sourced;
                 # every value interpolated into `command` is shlex.quoted.
-                completed = run(
+                # run_as_agent, not run: this is the solver agent's own turn,
+                # dropped to the unprivileged benchagent uid so it cannot read
+                # the fault injector under tf/prebuilt/<task>/scripts/setup.sh.
+                completed = run_as_agent(
                     ["/bin/bash", "-c", command],
                     cwd=str(workdir),
                     extra_env=env_overlay,
@@ -539,6 +542,10 @@ class OpenClawAgent(AgentHarness):
         # is silently emptied. Make Node discoverable for the direct calls.
         env_overlay = _ensure_node_on_path(env_overlay)
         try:
+            # Stays on the privileged run(), not run_as_agent, pending a
+            # decision: this reads the just-completed session back off oc's
+            # own state dir, not the task's answer key, so it is a lower-risk
+            # privileged call than the agent turn itself.
             sessions = run(
                 [oc_bin, "sessions", "--agent", self.agent_name, "--json"],
                 check=False,
@@ -565,6 +572,7 @@ class OpenClawAgent(AgentHarness):
         with tempfile.TemporaryDirectory(prefix="oc-export-") as tmpdir:
             workspace = Path(tmpdir)
             try:
+                # Stays on the privileged run(); see the sessions call above.
                 export = run(
                     [
                         oc_bin,

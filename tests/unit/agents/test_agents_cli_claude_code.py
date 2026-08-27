@@ -836,6 +836,7 @@ def test_execute_returns_typed_result_with_trajectory(monkeypatch: pytest.Monkey
         return SimpleNamespace(stdout=SAMPLE_STREAM, stderr="", returncode=0)
 
     monkeypatch.setattr(claude_mod, "run", fake_run)
+    monkeypatch.setattr(claude_mod, "run_as_agent", fake_run)
     result = ClaudeCodeAgent(AgentConfig(target="claude-x", timeout_sec=30.0)).run("ping")
     assert result.output == "Done."
     assert len(result.trajectory) == 2
@@ -854,6 +855,7 @@ def test_execute_wires_extra_env_into_subprocess_call(monkeypatch: pytest.Monkey
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
     monkeypatch.setattr(claude_mod, "run", fake_run)
+    monkeypatch.setattr(claude_mod, "run_as_agent", fake_run)
     ClaudeCodeAgent(AgentConfig(target="claude", api_key="sk-abc")).run("p")
     env = captured["extra_env"]
     assert env["ANTHROPIC_API_KEY"] == "sk-abc"
@@ -865,6 +867,7 @@ def test_execute_records_non_zero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
         return SimpleNamespace(stdout="", stderr="boom", returncode=2)
 
     monkeypatch.setattr(claude_mod, "run", fake_run)
+    monkeypatch.setattr(claude_mod, "run_as_agent", fake_run)
     result = ClaudeCodeAgent(AgentConfig(target="claude")).run("p")
     assert result.has_errors()
     assert any("exited 2" in e for e in result.errors)
@@ -883,6 +886,7 @@ def test_execute_parses_stream_on_non_zero_exit(monkeypatch: pytest.MonkeyPatch)
         return SimpleNamespace(stdout=stream, stderr="turn limit reached", returncode=1)
 
     monkeypatch.setattr(claude_mod, "run", fake_run)
+    monkeypatch.setattr(claude_mod, "run_as_agent", fake_run)
     result = ClaudeCodeAgent(AgentConfig(target="claude")).run("p")
     assert result.output == "hit the cap"
     assert len(result.trajectory) == 1
@@ -899,6 +903,7 @@ def test_execute_captures_stderr_on_clean_exit(monkeypatch: pytest.MonkeyPatch) 
         return SimpleNamespace(stdout=SAMPLE_STREAM, stderr="a warning", returncode=0)
 
     monkeypatch.setattr(claude_mod, "run", fake_run)
+    monkeypatch.setattr(claude_mod, "run_as_agent", fake_run)
     result = ClaudeCodeAgent(AgentConfig(target="claude")).run("p")
     assert result.metadata["stderr"] == "a warning"
     assert "returncode" not in result.metadata
@@ -910,6 +915,7 @@ def test_execute_handles_subprocess_error(monkeypatch: pytest.MonkeyPatch) -> No
         raise SubprocessError(argv, returncode=-1, stdout="", stderr="timeout")
 
     monkeypatch.setattr(claude_mod, "run", fake_run)
+    monkeypatch.setattr(claude_mod, "run_as_agent", fake_run)
     result = ClaudeCodeAgent(AgentConfig(target="claude")).run("p")
     assert result.has_errors()
     assert "subprocess error" in result.errors[0]
@@ -931,6 +937,7 @@ def test_execute_recovers_partial_trajectory_on_timeout(monkeypatch: pytest.Monk
         raise SubprocessError(argv, returncode=-1, stdout=partial, stderr="killed after timeout")
 
     monkeypatch.setattr(claude_mod, "run", fake_run)
+    monkeypatch.setattr(claude_mod, "run_as_agent", fake_run)
     result = ClaudeCodeAgent(AgentConfig(target="claude")).run("p")
     assert result.has_errors()
     assert any("subprocess error" in e for e in result.errors)
@@ -943,6 +950,7 @@ def test_execute_handles_missing_binary(monkeypatch: pytest.MonkeyPatch) -> None
         raise OSError("not found")
 
     monkeypatch.setattr(claude_mod, "run", fake_run)
+    monkeypatch.setattr(claude_mod, "run_as_agent", fake_run)
     result = ClaudeCodeAgent(AgentConfig(target="claude")).run("p")
     assert result.has_errors()
     assert "failed to spawn claude" in result.errors[0]
@@ -957,6 +965,7 @@ def test_execute_passes_timeout_to_subprocess(monkeypatch: pytest.MonkeyPatch) -
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
     monkeypatch.setattr(claude_mod, "run", fake_run)
+    monkeypatch.setattr(claude_mod, "run_as_agent", fake_run)
     ClaudeCodeAgent(AgentConfig(target="claude", timeout_sec=15.5)).run("p")
     assert captured["timeout"] == 15.5
 
@@ -984,6 +993,7 @@ def test_execute_writes_claude_md_with_rules_text_before_subprocess(
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
     monkeypatch.setattr(claude_mod, "run", fake_run)
+    monkeypatch.setattr(claude_mod, "run_as_agent", fake_run)
     caps = AllCapabilities(rules=AgentRules(text="you are a precise SRE"))
     ClaudeCodeAgent(AgentConfig(target="claude", capabilities=caps)).run("p")
     assert captured["exists"], "CLAUDE.md must exist in cwd before subprocess"
@@ -999,6 +1009,7 @@ def test_execute_skips_writing_claude_md_when_rules_empty(monkeypatch: pytest.Mo
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
     monkeypatch.setattr(claude_mod, "run", fake_run)
+    monkeypatch.setattr(claude_mod, "run_as_agent", fake_run)
     ClaudeCodeAgent(AgentConfig(target="claude")).run("p")
     assert captured["exists"] is False
 
@@ -1019,6 +1030,7 @@ def test_execute_writes_mcp_config_and_passes_flag(monkeypatch: pytest.MonkeyPat
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
     monkeypatch.setattr(claude_mod, "run", fake_run)
+    monkeypatch.setattr(claude_mod, "run_as_agent", fake_run)
     caps = AllCapabilities(
         mcp_servers=(McpBinding(name="gke", command=("gke-mcp",), tools=("mcp__gke__x",)),),
     )
@@ -1055,6 +1067,7 @@ def test_execute_refuses_mcp_run_on_a_binary_predating_the_startup_wait(
         raise AssertionError("the agent turn must not run on an under-version binary")
 
     monkeypatch.setattr(claude_mod, "run", fake_run)
+    monkeypatch.setattr(claude_mod, "run_as_agent", fake_run)
     result = ClaudeCodeAgent(AgentConfig(target="claude", capabilities=_mcp_caps())).run("p")
 
     assert calls == [["claude", "--version"]]
@@ -1075,6 +1088,7 @@ def test_execute_skips_the_version_probe_without_mcp_bindings(
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
     monkeypatch.setattr(claude_mod, "run", fake_run)
+    monkeypatch.setattr(claude_mod, "run_as_agent", fake_run)
     ClaudeCodeAgent(AgentConfig(target="claude")).run("p")
 
     assert all("--version" not in argv for argv in calls)
@@ -1105,6 +1119,7 @@ def test_execute_proceeds_when_the_version_probe_is_inconclusive(
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
     monkeypatch.setattr(claude_mod, "run", fake_run)
+    monkeypatch.setattr(claude_mod, "run_as_agent", fake_run)
     ClaudeCodeAgent(AgentConfig(target="claude", capabilities=_mcp_caps())).run("p")
 
     assert len(ran) == 1
@@ -1121,6 +1136,7 @@ def test_execute_writes_no_mcp_config_when_no_command(monkeypatch: pytest.Monkey
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
     monkeypatch.setattr(claude_mod, "run", fake_run)
+    monkeypatch.setattr(claude_mod, "run_as_agent", fake_run)
     # Binding carries tools but no launch command → nothing to write.
     caps = AllCapabilities(
         mcp_servers=(McpBinding(name="builtin", command=(), tools=("alpha",)),),
@@ -1151,6 +1167,7 @@ def test_execute_materializes_skills_into_workspace(
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
     monkeypatch.setattr(claude_mod, "run", fake_run)
+    monkeypatch.setattr(claude_mod, "run_as_agent", fake_run)
     caps = AllCapabilities(skills=SkillBinding(paths=(str(tmp_path / "skills"),)))
     ClaudeCodeAgent(AgentConfig(target="claude", capabilities=caps)).run("p")
     assert captured["exists"], "skill must be materialized before subprocess"
@@ -1174,6 +1191,7 @@ def test_execute_injects_per_run_config_dir_when_ambient_unset(
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
     monkeypatch.setattr(claude_mod, "run", fake_run)
+    monkeypatch.setattr(claude_mod, "run_as_agent", fake_run)
     ClaudeCodeAgent(AgentConfig(target="claude")).run("p")
 
     cfg_dir = captured["config_dir"]
@@ -1195,6 +1213,7 @@ def test_execute_respects_operator_config_dir(monkeypatch: pytest.MonkeyPatch) -
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
     monkeypatch.setattr(claude_mod, "run", fake_run)
+    monkeypatch.setattr(claude_mod, "run_as_agent", fake_run)
     ClaudeCodeAgent(AgentConfig(target="claude")).run("p")
     # The harness does not override an operator-exported value (it flows through
     # os.environ, not the overlay), so no CLAUDE_CONFIG_DIR is added to extra_env.
@@ -1216,6 +1235,7 @@ def test_execute_overrides_operator_config_dir_under_parallel(
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
     monkeypatch.setattr(claude_mod, "run", fake_run)
+    monkeypatch.setattr(claude_mod, "run_as_agent", fake_run)
     agent = ClaudeCodeAgent(AgentConfig(target="claude"))
     agent.run("p")
     agent.run("p")
@@ -1235,6 +1255,7 @@ def test_execute_uses_distinct_cwd_and_config_dir_per_run(monkeypatch: pytest.Mo
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
     monkeypatch.setattr(claude_mod, "run", fake_run)
+    monkeypatch.setattr(claude_mod, "run_as_agent", fake_run)
     agent = ClaudeCodeAgent(AgentConfig(target="claude"))
     agent.run("p")
     agent.run("p")

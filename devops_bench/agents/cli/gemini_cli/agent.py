@@ -52,7 +52,7 @@ from devops_bench.agents.shared.cli_capabilities import (
 from devops_bench.agents.shared.signal_death import classify_returncode
 from devops_bench.core import SubprocessError, get_logger
 from devops_bench.core.model_providers import resolve_provider
-from devops_bench.core.subprocess import CompletedProcess, run
+from devops_bench.core.subprocess import CompletedProcess, run_as_agent
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only import
     from devops_bench.agents.capabilities import McpBinding
@@ -300,7 +300,16 @@ class GeminiCliAgent(AgentHarness):
             )
             with guard:
                 try:
-                    completed = run(
+                    # run_as_agent, not run: this is the solver agent's own
+                    # turn, dropped to the unprivileged benchagent uid so it
+                    # cannot read the fault injector under
+                    # tf/prebuilt/<task>/scripts/setup.sh. NOTE: benchagent is
+                    # deliberately not in the docker group, so this path is
+                    # incompatible with BENCH_AGENT_SANDBOX=docker (run_argv
+                    # would then be a `docker run` invocation, which needs the
+                    # docker group) -- the two containment mechanisms are not
+                    # meant to be combined.
+                    completed = run_as_agent(
                         run_argv,
                         # Needed unconditionally now, sandboxed or not: when
                         # sandboxed, this is what makes env_overlay's values

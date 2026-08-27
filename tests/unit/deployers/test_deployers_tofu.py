@@ -326,6 +326,37 @@ def test_init_isolates_only_the_running_stack_and_shared_modules(
     assert not (dest_tf / "prebuilt" / "other-stack").exists()
 
 
+def test_init_isolated_copy_is_locked_down_to_0700(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: StubProvider
+) -> None:
+    """The per-run copy of the stack (including scripts/setup.sh, the task's
+    answer key) is root-owned mode 0700/0600 after copytree, regardless of
+    the source tree's own modes, so a dropped-privilege solver agent uid
+    cannot read it off disk.
+    """
+    root = tmp_path / "stacks"
+    stack_dir = root / "my-stack"
+    scripts_dir = stack_dir / "scripts"
+    scripts_dir.mkdir(parents=True)
+    setup_sh = scripts_dir / "setup.sh"
+    setup_sh.write_text("#!/bin/sh\necho fault-injector\n")
+    setup_sh.chmod(0o644)
+    stack_dir.chmod(0o755)
+    scripts_dir.chmod(0o755)
+    run_dir = tmp_path / "run"
+    monkeypatch.setenv("BENCH_TF_ROOT", str(root))
+    monkeypatch.setenv("TF_DATA_DIR", str(run_dir / "tf-data"))
+
+    deployer = TFDeployer(tf_dir="my-stack", provider=provider)
+
+    work_dir = Path(deployer.work_dir)
+    assert (work_dir.stat().st_mode & 0o777) == 0o700
+    copied_setup = work_dir / "scripts" / "setup.sh"
+    assert copied_setup.exists()
+    assert (copied_setup.stat().st_mode & 0o777) == 0o600
+    assert (work_dir / "scripts").stat().st_mode & 0o777 == 0o700
+
+
 def test_isolation_refused_when_root_contains_scratch_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: StubProvider, caplog: Any
 ) -> None:

@@ -26,6 +26,7 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -35,7 +36,8 @@ import pytest
 
 from devops_bench.agents import AGENTS, AgentHarness
 from devops_bench.agents.result import AgentResult, ToolCall
-from devops_bench.core import ConfigError, MissingDependencyError
+from devops_bench.core import ClusterInfo, ConfigError, MissingDependencyError, RunContext
+from devops_bench.core.subprocess import AgentIdentityError
 from devops_bench.evalharness import default as harness_default
 from devops_bench.evalharness.default import DefaultEvalHarness
 from devops_bench.tasks import Task
@@ -61,6 +63,23 @@ def isolated_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "BENCH_AGENT_IMAGE",
     ):
         monkeypatch.delenv(var, raising=False)
+    # execute_agent() now resolves the benchagent identity and chowns the
+    # workspace/kubeconfig around the agent's turn (see
+    # resolve_agent_identity / _chown_tree), which on a real executor is
+    # root chowning to a real unprivileged user. Neither precondition holds
+    # on a dev/CI box: there is no benchagent uid 2000, and even chown(2) to
+    # a file's own current owner is root-only under POSIX's
+    # _POSIX_CHOWN_RESTRICTED (verified: it EPERMs here even for a
+    # self-no-op chown). Stub identity resolution and the chown helper
+    # itself so these unrelated tests don't require running as root; the
+    # chown/chmod logic itself has its own focused tests in
+    # test_default_harness.py (see test_execute_agent_chowns_workspace_*)
+    # and test_subprocess.py.
+    monkeypatch.setattr(
+        harness_default, "resolve_agent_identity", lambda: (os.getuid(), os.getgid())
+    )
+    monkeypatch.setattr(harness_default, "_chown_tree", lambda path, uid, gid: None)
+    monkeypatch.setattr(harness_default.os, "chown", lambda path, uid, gid: None)
 
 
 def test_parse_chaos_specs_raises_on_malformed_json(isolated_env: None) -> None:
@@ -462,6 +481,182 @@ class _WorkspaceWritingAgent(AgentHarness):
         assert workspace_path is not None
         (workspace_path / "output.txt").write_text("agent wrote this")
         return AgentResult(output="wrote a file", trajectory=[])
+
+
+def test_execute_agent_chowns_workspace_and_kubeconfig_to_agent_uid(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The workspace and kubeconfig are handed to the agent uid, and the
+    kubeconfig is narrowed to mode 0600, before the agent's turn runs.
+
+    Runs outside ``isolated_env`` deliberately: that fixture stubs out
+    ``resolve_agent_identity``/``_chown_tree``/``os.chown`` as no-ops so
+    unrelated tests don't need a real ``benchagent`` uid, but this test is
+    exactly the one that needs to observe those calls.
+    """
+    AGENTS.register("fake-chown-probe")(_WorkspaceWritingAgent)
+    try:
+        harness = DefaultEvalHarness(
+            project_id="p", cluster_name="c", agent_type="fake-chown-probe", no_infra=True
+        )
+        monkeypatch.setattr(harness_default, "resolve_agent_identity", lambda: (2000, 2000))
+        chowned_trees: list[tuple[Path, int, int]] = []
+        monkeypatch.setattr(
+            harness_default,
+            "_chown_tree",
+            lambda path, uid, gid: chowned_trees.append((path, uid, gid)),
+        )
+        os_chowned: list[tuple[Path, int, int]] = []
+        monkeypatch.setattr(
+            harness_default.os,
+            "chown",
+            lambda path, uid, gid: os_chowned.append((Path(path), uid, gid)),
+        )
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        kubeconfig = tmp_path / "kubeconfig"
+        kubeconfig.write_text("apiVersion: v1")
+        kubeconfig.chmod(0o644)
+
+        cluster = ClusterInfo(name="c", kubeconfig_path=str(kubeconfig))
+        ctx = RunContext(task_id="t", workspace_path=workspace, cluster=cluster)
+
+        harness.execute_agent("prompt", ctx)
+
+        assert chowned_trees[0] == (workspace, 2000, 2000)
+        assert os_chowned[0] == (kubeconfig, 2000, 2000)
+        assert (kubeconfig.stat().st_mode & 0o777) == 0o600
+    finally:
+        AGENTS._items.pop("fake-chown-probe", None)  # noqa: SLF001
+
+
+def test_execute_agent_chowns_back_to_root_after_the_agent_succeeds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Ownership is handed back to root once the agent's turn completes, so the
+    post-agent pipeline (artifact collection, verification's kubectl calls)
+    keeps running as root without hitting permission errors.
+    """
+    AGENTS.register("fake-chown-back-probe")(_WorkspaceWritingAgent)
+    try:
+        harness = DefaultEvalHarness(
+            project_id="p", cluster_name="c", agent_type="fake-chown-back-probe", no_infra=True
+        )
+        monkeypatch.setattr(harness_default, "resolve_agent_identity", lambda: (2000, 2000))
+        chowned_trees: list[tuple[Path, int, int]] = []
+        monkeypatch.setattr(
+            harness_default,
+            "_chown_tree",
+            lambda path, uid, gid: chowned_trees.append((path, uid, gid)),
+        )
+        os_chowned: list[tuple[Path, int, int]] = []
+        monkeypatch.setattr(
+            harness_default.os,
+            "chown",
+            lambda path, uid, gid: os_chowned.append((Path(path), uid, gid)),
+        )
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        kubeconfig = tmp_path / "kubeconfig"
+        kubeconfig.write_text("apiVersion: v1")
+
+        cluster = ClusterInfo(name="c", kubeconfig_path=str(kubeconfig))
+        ctx = RunContext(task_id="t", workspace_path=workspace, cluster=cluster)
+
+        harness.execute_agent("prompt", ctx)
+
+        assert chowned_trees[-1] == (workspace, 0, 0)
+        assert os_chowned[-1] == (kubeconfig, 0, 0)
+    finally:
+        AGENTS._items.pop("fake-chown-back-probe", None)  # noqa: SLF001
+
+
+class _RaisingAgent(AgentHarness):
+    """Stand-in agent whose turn always raises, to exercise the finally path.
+
+    ``AgentHarness.run`` catches this itself and converts it to an errored
+    ``AgentResult`` (see ``agents/base.py``'s safety net), so this exercises
+    ``execute_agent``'s ``finally`` block by way of an unexpected-exception
+    result rather than the exception propagating out of ``execute_agent``.
+    """
+
+    def _execute(self, prompt: str, workspace_path: Path | None = None) -> AgentResult:
+        raise RuntimeError("agent blew up")
+
+
+def test_execute_agent_chowns_back_to_root_even_when_the_agent_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failing agent turn still hands ownership back to root: the chown-back
+    is unconditional (``finally``), not only on the success path.
+    """
+    AGENTS.register("fake-chown-back-on-error-probe")(_RaisingAgent)
+    try:
+        harness = DefaultEvalHarness(
+            project_id="p",
+            cluster_name="c",
+            agent_type="fake-chown-back-on-error-probe",
+            no_infra=True,
+        )
+        monkeypatch.setattr(harness_default, "resolve_agent_identity", lambda: (2000, 2000))
+        chowned_trees: list[tuple[Path, int, int]] = []
+        monkeypatch.setattr(
+            harness_default,
+            "_chown_tree",
+            lambda path, uid, gid: chowned_trees.append((path, uid, gid)),
+        )
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        ctx = RunContext(task_id="t", workspace_path=workspace, cluster=None)
+
+        result = harness.execute_agent("prompt", ctx)
+
+        assert "agent blew up" in "".join(result.errors)
+        assert chowned_trees[-1] == (workspace, 0, 0)
+    finally:
+        AGENTS._items.pop("fake-chown-back-on-error-probe", None)  # noqa: SLF001
+
+
+def test_execute_agent_raises_and_never_chowns_when_agent_identity_is_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A missing benchagent uid/gid fails the whole turn loudly, before any
+    chown runs, rather than silently falling back to running the agent as
+    root in an unowned workspace.
+    """
+    AGENTS.register("fake-missing-identity-probe")(_WorkspaceWritingAgent)
+    try:
+        harness = DefaultEvalHarness(
+            project_id="p",
+            cluster_name="c",
+            agent_type="fake-missing-identity-probe",
+            no_infra=True,
+        )
+
+        def _raise_identity_error() -> tuple[int, int]:
+            raise AgentIdentityError("user 'benchagent' (uid 2000) does not exist on this host")
+
+        monkeypatch.setattr(harness_default, "resolve_agent_identity", _raise_identity_error)
+        chowned_trees: list[tuple[Path, int, int]] = []
+        monkeypatch.setattr(
+            harness_default,
+            "_chown_tree",
+            lambda path, uid, gid: chowned_trees.append((path, uid, gid)),
+        )
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        ctx = RunContext(task_id="t", workspace_path=workspace, cluster=None)
+
+        with pytest.raises(AgentIdentityError, match="benchagent"):
+            harness.execute_agent("prompt", ctx)
+
+        assert chowned_trees == []
+    finally:
+        AGENTS._items.pop("fake-missing-identity-probe", None)  # noqa: SLF001
 
 
 def test_run_one_collects_files_the_agent_writes_to_its_workspace(

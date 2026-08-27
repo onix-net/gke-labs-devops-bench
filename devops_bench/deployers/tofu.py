@@ -162,8 +162,11 @@ def _isolated_work_dir(stack_dir: str, tf_root: Path) -> str:
     modules_src = resolved_tf_root / "modules"
     try:
         shutil.copytree(resolved_stack_dir, dest_stack, dirs_exist_ok=True)
+        _lock_down_copied_tree(dest_stack)
         if modules_src.is_dir():
-            shutil.copytree(modules_src, dest_tf / "modules", dirs_exist_ok=True)
+            dest_modules = dest_tf / "modules"
+            shutil.copytree(modules_src, dest_modules, dirs_exist_ok=True)
+            _lock_down_copied_tree(dest_modules)
         return str(dest_stack)
     except OSError as exc:
         _log.warning(
@@ -172,6 +175,28 @@ def _isolated_work_dir(stack_dir: str, tf_root: Path) -> str:
             stack_dir,
         )
         return stack_dir
+
+
+def _lock_down_copied_tree(root: Path) -> None:
+    """Recursively set a copied stack tree to root-owned, root-only mode.
+
+    ``shutil.copytree`` preserves the SOURCE tree's modes, so a stack
+    directory whose ``scripts/setup.sh`` (the task's fault injector, i.e.
+    its answer key) was world-readable in ``tf/`` lands just as readable
+    once copied into the per-run scratch dir. The dropped-privilege solver
+    agent runs under a plain uid with no container boundary, so a
+    world-readable answer key on disk is directly reachable from its shell.
+    Locking the copy to 0700 (dirs) / 0600 (files) closes that off while
+    leaving :meth:`TFDeployer.up` and :meth:`TFDeployer.down` -- both still
+    root -- able to read it. Ownership itself is left alone: ``copytree``
+    already ran as the invoking process (root, on every path that matters --
+    tofu apply/destroy require it regardless of this hardening), so the copy
+    is already root-owned; this only needs to narrow the mode bits an
+    unprivileged solver-agent uid could otherwise read through.
+    """
+    root.chmod(0o700)
+    for path in root.rglob("*"):
+        path.chmod(0o700 if path.is_dir() else 0o600)
 
 
 class TFDeployer(Deployer):

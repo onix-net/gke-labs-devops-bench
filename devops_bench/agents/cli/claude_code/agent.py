@@ -63,7 +63,7 @@ from devops_bench.agents.shared.cli_capabilities import (
 from devops_bench.core import SubprocessError, get_logger
 from devops_bench.core.config import get_bool
 from devops_bench.core.model_providers import resolve_provider
-from devops_bench.core.subprocess import run
+from devops_bench.core.subprocess import run, run_as_agent
 
 __all__ = ["ClaudeCodeAgent"]
 
@@ -342,7 +342,11 @@ class ClaudeCodeAgent(AgentHarness):
             with _claude_config_dir() as config_dir:
                 env_overlay = _build_env(self.config, config_dir=config_dir)
                 try:
-                    completed = run(
+                    # run_as_agent, not run: this is the solver agent's own
+                    # turn, dropped to the unprivileged benchagent uid so it
+                    # cannot read the fault injector under
+                    # tf/prebuilt/<task>/scripts/setup.sh.
+                    completed = run_as_agent(
                         argv,
                         extra_env=env_overlay,
                         cwd=workdir,

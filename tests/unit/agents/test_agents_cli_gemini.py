@@ -200,7 +200,7 @@ def test_execute_returns_typed_result_with_trajectory(monkeypatch: pytest.Monkey
         captured["extra_env"] = kwargs.get("extra_env")
         return SimpleNamespace(stdout=SAMPLE_STREAM, stderr="", returncode=0)
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     agent = GeminiCliAgent(AgentConfig(target="gemini-x", timeout_sec=30.0))
     result = agent.run("ping")
     assert result.output == "Done."
@@ -218,7 +218,7 @@ def test_execute_records_non_zero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_run(argv, **kwargs):
         return SimpleNamespace(stdout="", stderr="boom", returncode=2)
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     result = GeminiCliAgent(AgentConfig(target="gemini")).run("p")
     assert result.has_errors()
     assert any("exited 2" in e for e in result.errors)
@@ -234,7 +234,7 @@ def test_execute_classifies_sigkill_exit_as_signal_death(monkeypatch: pytest.Mon
     def fake_run(argv, **kwargs):
         return SimpleNamespace(stdout="", stderr="", returncode=137)
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     result = GeminiCliAgent(AgentConfig(target="gemini")).run("p")
     assert result.has_errors()
     assert result.metadata.get("returncode") == 137
@@ -251,7 +251,7 @@ def test_execute_classifies_sigterm_exit_as_signal_death(monkeypatch: pytest.Mon
     def fake_run(argv, **kwargs):
         return SimpleNamespace(stdout="", stderr="", returncode=143)
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     result = GeminiCliAgent(AgentConfig(target="gemini")).run("p")
     signal_death = result.metadata.get("signal_death")
     assert signal_death is not None
@@ -268,7 +268,7 @@ def test_execute_ordinary_non_zero_exit_is_not_a_signal_death(
     def fake_run(argv, **kwargs):
         return SimpleNamespace(stdout="", stderr="boom", returncode=2)
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     result = GeminiCliAgent(AgentConfig(target="gemini")).run("p")
     assert result.metadata.get("signal_death") is None
 
@@ -277,7 +277,7 @@ def test_execute_handles_subprocess_error(monkeypatch: pytest.MonkeyPatch) -> No
     def fake_run(argv, **kwargs):
         raise SubprocessError(argv, returncode=-1, stdout="", stderr="timeout")
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     result = GeminiCliAgent(AgentConfig(target="gemini")).run("p")
     assert result.has_errors()
     assert "subprocess error" in result.errors[0]
@@ -308,7 +308,7 @@ def test_execute_timeout_recovers_partial_trajectory(monkeypatch: pytest.MonkeyP
     def fake_run(argv, **kwargs):
         raise SubprocessError(argv, returncode=-1, stdout=partial_stream, stderr="")
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     result = GeminiCliAgent(AgentConfig(target="gemini", timeout_sec=600.0)).run("p")
     assert result.has_errors()
     assert result.metadata.get("timed_out") is True
@@ -327,7 +327,7 @@ def test_execute_handles_missing_binary(monkeypatch: pytest.MonkeyPatch) -> None
     def fake_run(argv, **kwargs):
         raise OSError("not found")
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     result = GeminiCliAgent(AgentConfig(target="gemini")).run("p")
     assert result.has_errors()
     assert "binary unavailable" in result.errors[0]
@@ -340,7 +340,7 @@ def test_execute_passes_timeout_to_subprocess(monkeypatch: pytest.MonkeyPatch) -
         captured.update(kwargs)
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     GeminiCliAgent(AgentConfig(target="gemini", timeout_sec=15.5)).run("p")
     assert captured["timeout"] == 15.5
 
@@ -353,7 +353,7 @@ def test_execute_wires_extra_env_into_subprocess_call(monkeypatch: pytest.Monkey
         captured["extra_env"] = kwargs.get("extra_env")
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     cfg = AgentConfig(target="gemini", model="gemini-2.5-pro", api_key="abc")
     GeminiCliAgent(cfg).run("p")
     env = captured["extra_env"]
@@ -522,7 +522,7 @@ def test_execute_pulls_allowed_tools_from_capabilities(monkeypatch: pytest.Monke
         captured["argv"] = argv
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     caps = AllCapabilities(
         mcp_servers=(McpBinding(name="t", command=(), tools=("alpha", "beta")),),
     )
@@ -543,7 +543,7 @@ def test_execute_disables_extensions_when_capabilities_have_no_mcp(
         captured["argv"] = argv
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     GeminiCliAgent(AgentConfig(target="gemini")).run("p")
     assert "--extensions=" in captured["argv"]
     assert "--allowed-tools" not in captured["argv"]
@@ -595,7 +595,7 @@ def test_execute_writes_gemini_md_with_rules_text_before_subprocess(
         )
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     caps = AllCapabilities(rules=AgentRules(text="you are a precise SRE"))
     GeminiCliAgent(AgentConfig(target="gemini", capabilities=caps)).run("p")
 
@@ -615,7 +615,7 @@ def test_execute_skips_writing_gemini_md_when_rules_empty(monkeypatch: pytest.Mo
         captured["gemini_md_exists"] = bool(gemini_md and os.path.exists(gemini_md))
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     GeminiCliAgent(AgentConfig(target="gemini")).run("p")  # default empty rules
     assert captured["gemini_md_exists"] is False
 
@@ -629,7 +629,7 @@ def test_execute_cleans_up_temp_working_dir_after_run(monkeypatch: pytest.Monkey
         captured["cwd"] = kwargs.get("cwd")
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     caps = AllCapabilities(rules=AgentRules(text="any rules"))
     GeminiCliAgent(AgentConfig(target="gemini", capabilities=caps)).run("p")
     # cwd was a real path during the run; after _execute returns it is gone.
@@ -669,7 +669,7 @@ def test_execute_writes_mcp_servers_into_workspace_settings(
                 captured["settings"] = json.load(f)
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     caps = AllCapabilities(
         mcp_servers=(McpBinding(name="gke", command=("gke-mcp",), tools=("mcp_gke_x",)),),
     )
@@ -696,7 +696,7 @@ def test_execute_writes_settings_with_dynamic_model_configuration_when_no_comman
                 captured["settings"] = json.load(f)
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     # Binding carries tools (→ --allowed-tools) but no launch command.
     caps = AllCapabilities(
         mcp_servers=(McpBinding(name="builtin", command=(), tools=("alpha",)),),
@@ -719,7 +719,7 @@ def test_execute_writes_dynamic_model_configuration_merged_with_mcp_servers(
             captured["settings"] = json.load(f)
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     caps = AllCapabilities(
         mcp_servers=(McpBinding(name="gke", command=("gke-mcp",), tools=("mcp_gke_x",)),),
     )
@@ -754,7 +754,7 @@ def test_execute_materializes_skills_into_workspace(
             captured["settings"] = json.load(f)
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     caps = AllCapabilities(skills=SkillBinding(paths=(str(tmp_path / "skills"),)))
     GeminiCliAgent(AgentConfig(target="gemini", capabilities=caps)).run("p")
 
@@ -773,7 +773,7 @@ def test_execute_warns_and_skips_missing_skill_paths(monkeypatch: pytest.MonkeyP
             captured["settings"] = json.load(f)
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     caps = AllCapabilities(skills=SkillBinding(paths=("/no/such/skills/dir",)))
     GeminiCliAgent(AgentConfig(target="gemini", capabilities=caps)).run("p")
     assert "skills" not in captured["settings"]
@@ -800,7 +800,7 @@ def test_execute_runs_in_isolated_temp_cwd_not_user_home(monkeypatch: pytest.Mon
         captured["cwd"] = kwargs.get("cwd")
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     GeminiCliAgent(AgentConfig(target="gemini")).run("p")
 
     cwd = captured["cwd"]
@@ -822,7 +822,7 @@ def test_execute_uses_distinct_cwd_per_run(monkeypatch: pytest.MonkeyPatch) -> N
         cwds.append(kwargs.get("cwd"))
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     # Two separate agents and a re-run of one — all must get unique cwds.
     GeminiCliAgent(AgentConfig(target="gemini")).run("p")
     agent = GeminiCliAgent(AgentConfig(target="gemini"))
@@ -868,7 +868,7 @@ def test_execute_sandboxed_run_never_puts_api_key_in_docker_argv(
         captured["extra_env"] = kwargs.get("extra_env")
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     cfg = AgentConfig(target="gemini", api_key=secret)
     GeminiCliAgent(cfg).run("p")
 
@@ -902,7 +902,7 @@ def test_execute_sandboxed_timeout_never_leaks_api_key_into_agent_result(
         # SubprocessError built from the actual argv it was asked to run.
         raise SubprocessError(argv, returncode=-1, stdout="", stderr="")
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     cfg = AgentConfig(target="gemini", api_key=secret)
     result = GeminiCliAgent(cfg).run("p")
 
@@ -927,7 +927,7 @@ def test_execute_sandboxed_run_names_the_container_from_its_workspace(
         captured["cwd"] = kwargs.get("cwd")
         return SimpleNamespace(stdout="", stderr="", returncode=0)
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     GeminiCliAgent(AgentConfig(target="gemini")).run("p")
 
     workdir_name = os.path.basename(captured["cwd"])
@@ -948,7 +948,7 @@ def test_execute_sandboxed_run_reaps_container_on_normal_completion(
     def fake_run(argv, **kwargs):
         return SimpleNamespace(stdout=SAMPLE_STREAM, stderr="", returncode=0)
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     GeminiCliAgent(AgentConfig(target="gemini")).run("p")
 
     assert len(killed) == 1
@@ -967,7 +967,7 @@ def test_execute_sandboxed_run_reaps_container_on_timeout(
     def fake_run(argv, **kwargs):
         raise SubprocessError(argv, returncode=-1, stdout="", stderr="")
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     result = GeminiCliAgent(AgentConfig(target="gemini")).run("p")
 
     assert result.metadata.get("timed_out") is True
@@ -987,7 +987,7 @@ def test_execute_sandboxed_run_reaps_container_when_binary_unavailable(
     def fake_run(argv, **kwargs):
         raise OSError("docker not found")
 
-    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    monkeypatch.setattr(gemini_mod, "run_as_agent", fake_run)
     result = GeminiCliAgent(AgentConfig(target="gemini")).run("p")
 
     assert result.has_errors()

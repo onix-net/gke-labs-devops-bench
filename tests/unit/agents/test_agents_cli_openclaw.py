@@ -323,12 +323,15 @@ def _install_oc_run(
     """
     core = fake_core_run or (lambda argv, **kwargs: _make_subprocess_result(json.dumps([]), "", 0))
 
-    def dispatch(argv, **kwargs):
-        if argv[0] == "/bin/bash":
-            return fake_bash(argv[2], **kwargs)
-        return core(argv, **kwargs)
+    def fake_agent_run(argv, **kwargs):
+        # The agent turn itself now runs through run_as_agent (the
+        # privilege-dropped path), not run; the sessions/export-trajectory
+        # extraction calls stay on run (see agent.py's own comments on why).
+        assert argv[0] == "/bin/bash"
+        return fake_bash(argv[2], **kwargs)
 
-    monkeypatch.setattr(oc_mod, "run", dispatch)
+    monkeypatch.setattr(oc_mod, "run_as_agent", fake_agent_run)
+    monkeypatch.setattr(oc_mod, "run", core)
 
 
 def _bundle_writer(events_jsonl: str) -> Callable[..., Any]:

@@ -681,19 +681,20 @@ def test_build_openclaw_config_wraps_servers_under_mcp() -> None:
     cfg = _build_openclaw_config(AgentConfig(), (McpBinding(name="gke", command=("gke-mcp",)),))
     assert cfg == {
         "mcp": {"servers": {"gke": {"command": "gke-mcp"}}},
-        "tools": {"codeMode": False},
+        "tools": {"codeMode": False, "deny": ["sessions_spawn", "sessions_yield"]},
     }
 
 
 def test_build_openclaw_config_carries_only_code_mode_without_launchable_server_or_override() -> (
     None
 ):
-    """No MCP binding and a catalog-known model → only ``tools.codeMode``."""
-    assert _build_openclaw_config(AgentConfig(), ()) == {"tools": {"codeMode": False}}
+    """No MCP binding and a catalog-known model → only ``tools.codeMode``/``deny``."""
+    expected = {"tools": {"codeMode": False, "deny": ["sessions_spawn", "sessions_yield"]}}
+    assert _build_openclaw_config(AgentConfig(), ()) == expected
     assert _build_openclaw_config(
         AgentConfig(model="gemini-3.1-pro-preview"),
         (McpBinding(name="b", command=(), tools=("t",)),),
-    ) == {"tools": {"codeMode": False}}
+    ) == expected
 
 
 def test_build_openclaw_config_merges_mcp_and_model_override() -> None:
@@ -707,6 +708,31 @@ def test_build_openclaw_config_merges_mcp_and_model_override() -> None:
         {"id": "gemini-3.5-flash", "name": "gemini-3.5-flash"}
     ]
     assert cfg["agents"]["defaults"]["models"] == {"google/gemini-3.5-flash": {}}
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        AgentConfig(),
+        AgentConfig(model="gpt-5.6-sol", provider="openai"),
+        AgentConfig(model="gemini-3.5-flash", provider="google-vertex"),
+    ],
+)
+def test_build_openclaw_config_denies_delegation_tools(config: AgentConfig) -> None:
+    """sessions_spawn/sessions_yield are denied regardless of provider: the bench
+    always runs embedded (``oc agent --local``), so a delegated subagent's
+    completion never arrives and the run would end having done no work."""
+    cfg = _build_openclaw_config(config, ())
+    assert set(cfg["tools"]["deny"]) == {"sessions_spawn", "sessions_yield"}
+
+
+def test_build_openclaw_config_deny_does_not_clobber_code_mode() -> None:
+    """The deny list coexists with ``tools.codeMode``; neither overwrites the other."""
+    cfg = _build_openclaw_config(AgentConfig(), ())
+    assert cfg["tools"] == {
+        "codeMode": False,
+        "deny": ["sessions_spawn", "sessions_yield"],
+    }
 
 
 def test_build_openclaw_config_pins_openai_to_builtin_agent_runtime() -> None:
@@ -856,7 +882,7 @@ def test_execute_writes_mcp_servers_into_isolated_config(
     assert captured["cfg_path"], "OPENCLAW_CONFIG_PATH must be set when MCP is bound"
     assert captured["config"] == {
         "mcp": {"servers": {"gke": {"command": "gke-mcp"}}},
-        "tools": {"codeMode": False},
+        "tools": {"codeMode": False, "deny": ["sessions_spawn", "sessions_yield"]},
     }
 
 
@@ -888,7 +914,9 @@ def test_execute_writes_code_mode_config_when_no_launchable_server(
         )
     ).run("p")
     assert captured["cfg_path"]
-    assert captured["config"] == {"tools": {"codeMode": False}}
+    assert captured["config"] == {
+        "tools": {"codeMode": False, "deny": ["sessions_spawn", "sessions_yield"]}
+    }
 
 
 def test_execute_writes_model_override_config_without_mcp(

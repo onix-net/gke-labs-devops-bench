@@ -151,6 +151,16 @@ _PROVIDER_TRANSPORT: dict[str, dict[str, str]] = {
     },
 }
 
+# The bench always launches openclaw as ``oc agent --local``, which is embedded
+# mode with no gateway (see :func:`_build_local_command`). ``sessions_spawn``
+# hands work off to a subagent whose completion is normally reported back by
+# the gateway; without one, the spawn call still reports success, but the
+# ``sessions_yield`` call that awaits the result waits on an event the gateway
+# never sends. The one-shot process then exits with no work done and the run
+# scores 0.0. Denying both tools keeps the model doing the work itself in its
+# own turn instead of delegating into a dead end.
+_DENIED_TOOLS: tuple[str, ...] = ("sessions_spawn", "sessions_yield")
+
 
 def _oc_model_id(config: AgentConfig) -> str:
     """Resolve the canonical ``provider/model`` id ``oc agent --model`` expects.
@@ -292,7 +302,10 @@ def _build_openclaw_config(config: AgentConfig, mcp_servers: tuple[McpBinding, .
         # built-in "openclaw" runtime avoids codex entirely.
         providers = payload.setdefault("models", {}).setdefault("providers", {})
         providers.setdefault(oc_provider, {})["agentRuntime"] = {"id": "openclaw"}
-    payload["tools"] = {"codeMode": _code_mode_enabled()}
+    payload["tools"] = {
+        "codeMode": _code_mode_enabled(),
+        "deny": list(_DENIED_TOOLS),
+    }
     return payload
 
 

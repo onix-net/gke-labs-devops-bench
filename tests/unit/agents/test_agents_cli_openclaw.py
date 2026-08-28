@@ -709,6 +709,27 @@ def test_build_openclaw_config_merges_mcp_and_model_override() -> None:
     assert cfg["agents"]["defaults"]["models"] == {"google/gemini-3.5-flash": {}}
 
 
+def test_build_openclaw_config_pins_openai_to_builtin_agent_runtime() -> None:
+    """openai provider gets an explicit agentRuntime so oc skips the codex route."""
+    cfg = _build_openclaw_config(AgentConfig(model="gpt-5.6-sol", provider="openai"), ())
+    assert cfg["models"]["providers"]["openai"]["agentRuntime"] == {"id": "openclaw"}
+
+
+def test_build_openclaw_config_omits_agent_runtime_for_non_openai_provider() -> None:
+    """A gemini/google-vertex config gets no agentRuntime override; it's inert today."""
+    cfg = _build_openclaw_config(AgentConfig(model="gemini-2.5-pro", provider="google-vertex"), ())
+    assert "models" not in cfg or "openai" not in cfg["models"].get("providers", {})
+
+
+def test_build_openclaw_config_agent_runtime_does_not_clobber_model_override() -> None:
+    """The openai agentRuntime merge coexists with a catalog override for another provider."""
+    cfg = _build_openclaw_config(AgentConfig(model="gemini-3.7-flash", provider="google"), ())
+    assert cfg["models"]["providers"]["google"]["models"] == [
+        {"id": "gemini-3.7-flash", "name": "gemini-3.7-flash"}
+    ]
+    assert "openai" not in cfg["models"]["providers"]
+
+
 # ---------------------------------------------------------------------------
 # Model catalog override: models oc doesn't ship by default get registered in
 # the per-run isolated config, for both google-genai and google-vertex.

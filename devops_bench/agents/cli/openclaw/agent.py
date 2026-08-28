@@ -282,6 +282,16 @@ def _build_openclaw_config(config: AgentConfig, mcp_servers: tuple[McpBinding, .
                 entry.setdefault("env", {})["KUBECONFIG"] = kubeconfig
         payload["mcp"] = {"servers": servers}
     payload.update(_build_model_override(config))
+    oc_provider = resolve_provider(config.provider).oc_provider
+    if oc_provider == "openai":
+        # openclaw implicitly routes OpenAI "dual route" model ids (e.g.
+        # gpt-5.6-sol) to the "codex" agent harness runtime, which ships as a
+        # separate plugin not registered on the fleet image, so the run dies at
+        # startup. openclaw checks a configured agentRuntime.id before that
+        # implicit routing logic and short-circuits, so pinning it here to the
+        # built-in "openclaw" runtime avoids codex entirely.
+        providers = payload.setdefault("models", {}).setdefault("providers", {})
+        providers.setdefault(oc_provider, {})["agentRuntime"] = {"id": "openclaw"}
     payload["tools"] = {"codeMode": _code_mode_enabled()}
     return payload
 

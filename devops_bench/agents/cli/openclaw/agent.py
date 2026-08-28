@@ -258,6 +258,16 @@ def _code_mode_enabled() -> bool:
     return raw.strip().lower() in ("1", "true", "yes")
 
 
+def _plugin_paths() -> list[str]:
+    """Read ``BENCH_OPENCLAW_PLUGIN_PATHS``, an os.pathsep-separated list.
+
+    Empty when unset or blank. Each entry is stripped; empty entries are
+    dropped.
+    """
+    raw = os.environ.get("BENCH_OPENCLAW_PLUGIN_PATHS", "")
+    return [p.strip() for p in raw.split(os.pathsep) if p.strip()]
+
+
 def _build_openclaw_config(config: AgentConfig, mcp_servers: tuple[McpBinding, ...]) -> dict:
     """Assemble the isolated ``openclaw.json`` payload for a run.
 
@@ -306,6 +316,12 @@ def _build_openclaw_config(config: AgentConfig, mcp_servers: tuple[McpBinding, .
         "codeMode": _code_mode_enabled(),
         "deny": list(_DENIED_TOOLS),
     }
+    # openclaw only discovers plugins bundled in its own dist/extensions or
+    # named in plugins.load.paths, so an externally installed provider
+    # package (e.g. anthropic-vertex) has to be named explicitly here.
+    plugin_paths = _plugin_paths()
+    if plugin_paths:
+        payload["plugins"] = {"load": {"paths": plugin_paths}}
     return payload
 
 

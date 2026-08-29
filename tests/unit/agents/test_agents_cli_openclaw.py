@@ -38,6 +38,7 @@ from devops_bench.agents.capabilities import (
 from devops_bench.agents.cli.openclaw import OpenClawAgent, parse_trajectory_export
 from devops_bench.agents.cli.openclaw import agent as oc_mod
 from devops_bench.agents.cli.openclaw.agent import (
+    _anthropic_vertex_base_url,
     _build_env,
     _build_local_command,
     _build_model_override,
@@ -265,6 +266,35 @@ def test_build_local_command_omits_model_flag_when_no_model_configured() -> None
     cmd = _build_local_command(AgentConfig(), "prompt", "main", "/usr/local/bin/oc")
     assert "--model" not in cmd
     assert "models set" not in cmd
+
+
+def test_build_local_command_forwards_extra_flags() -> None:
+    cfg = AgentConfig(extra_flags=("--flag1", "--opt=val", "--quoted=hello world"))
+    cmd = _build_local_command(cfg, "prompt", "main", "/usr/local/bin/oc")
+    assert "--flag1" in cmd
+    assert "--opt=val" in cmd
+    assert "'--quoted=hello world'" in cmd
+
+
+def test_build_local_command_seeds_anthropic_vertex_auth_profile() -> None:
+    """``oc agent --local`` reads the gateway auth store under
+    ``OPENCLAW_STATE_DIR``, which is empty every run (isolated per run), so an
+    anthropic-vertex run seeds a stored auth profile before the turn."""
+    cfg = AgentConfig(model="claude-opus-5", provider="anthropic-vertex")
+    cmd = _build_local_command(cfg, "prompt", "main", "/usr/local/bin/oc")
+    assert "models auth paste-api-key --provider anthropic-vertex" in cmd
+    assert "printf '%s' gcp-vertex-credentials" in cmd
+    # Failure must be interpretable, not swallowed.
+    assert "bench: seeding anthropic-vertex auth profile failed" in cmd
+    # Seeded before the agent turn itself.
+    assert cmd.index("paste-api-key") < cmd.index("agent --local")
+
+
+def test_build_local_command_omits_auth_seed_for_non_vertex_provider() -> None:
+    cfg = AgentConfig(model="gemini-2.5-pro", provider="gemini")
+    cmd = _build_local_command(cfg, "prompt", "main", "/usr/local/bin/oc")
+    assert "paste-api-key" not in cmd
+    assert "gcp-vertex-credentials" not in cmd
 
 
 def test_pick_session_key_handles_top_level_list() -> None:
@@ -850,6 +880,60 @@ def test_model_override_raises_for_unpinned_transport() -> None:
     fallback). A full-id with an unknown wire reaches this path."""
     with pytest.raises(ConfigError):
         _build_model_override(AgentConfig(model="mystery/gemini-3.5-flash"))
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({}, "https://aiplatform.googleapis.com"),
+        ({"GOOGLE_CLOUD_LOCATION": "global"}, "https://aiplatform.googleapis.com"),
+        ({"GOOGLE_CLOUD_LOCATION": "us"}, "https://aiplatform.us.rep.googleapis.com"),
+        ({"GOOGLE_CLOUD_LOCATION": "eu"}, "https://aiplatform.eu.rep.googleapis.com"),
+        (
+            {"GOOGLE_CLOUD_LOCATION": "us-east1"},
+            "https://us-east1-aiplatform.googleapis.com",
+        ),
+        ({"GOOGLE_CLOUD_LOCATION": "US-East1"}, "https://us-east1-aiplatform.googleapis.com"),
+        ({"GOOGLE_CLOUD_LOCATION": "  us-east1  "}, "https://us-east1-aiplatform.googleapis.com"),
+        ({"CLOUD_ML_REGION": "us-east1"}, "https://us-east1-aiplatform.googleapis.com"),
+    ],
+)
+def test_anthropic_vertex_base_url(env: dict[str, str], expected: str) -> None:
+    assert _anthropic_vertex_base_url(env) == expected
+
+
+def test_anthropic_vertex_base_url_prefers_google_cloud_location_over_cloud_ml_region() -> None:
+    env = {"GOOGLE_CLOUD_LOCATION": "us", "CLOUD_ML_REGION": "eu"}
+    assert _anthropic_vertex_base_url(env) == "https://aiplatform.us.rep.googleapis.com"
+
+
+def test_model_override_anthropic_vertex_pins_transport_and_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """anthropic-vertex: the entry pins ``api: anthropic-messages`` (the built-in
+    default is the OpenAI transport, which 401s) and a computed ``baseUrl`` (the
+    ``{location}`` template used for google-vertex yields the wrong host shape
+    here), and allowlists ``anthropic-vertex/<model>``."""
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-east1")
+    override = _build_model_override(
+        AgentConfig(model="claude-opus-5", provider="anthropic-vertex")
+    )
+    vertex = override["models"]["providers"]["anthropic-vertex"]
+    assert vertex["api"] == "anthropic-messages"
+    assert vertex["baseUrl"] == "https://us-east1-aiplatform.googleapis.com"
+    assert vertex["models"] == [{"id": "claude-opus-5", "name": "claude-opus-5"}]
+    assert override["agents"]["defaults"]["models"] == {"anthropic-vertex/claude-opus-5": {}}
+
+
+def test_model_override_vertex_still_uses_literal_location_template() -> None:
+    """Regression guard: the google-vertex entry keeps the literal ``{location}``
+    template (expanded by oc itself), unaffected by the anthropic-vertex
+    baseUrl computation."""
+    override = _build_model_override(
+        AgentConfig(model="gemini-3.5-flash", provider="google-vertex")
+    )
+    vertex = override["models"]["providers"]["google-vertex"]
+    assert vertex["baseUrl"] == "https://{location}-aiplatform.googleapis.com"
 
 
 def _empty_sessions_run(argv: list[str], **kwargs: Any) -> SimpleNamespace:

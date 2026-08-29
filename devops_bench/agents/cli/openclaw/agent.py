@@ -57,6 +57,7 @@ import os
 import shlex
 import shutil
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -135,12 +136,18 @@ _OPENCLAW_CONFIG_FILE = "openclaw.json"
 # Bare model ids (the part after ``provider/``) absent from openclaw's built-in
 # catalog; the harness registers these per-run (see :func:`_build_model_override`).
 # TODO(deferred): supported-model-name maintenance is tracked separately (#147).
-_CATALOG_OVERRIDES: frozenset[str] = frozenset({"gemini-3.5-flash", "gemini-3.7-flash"})
+_CATALOG_OVERRIDES: frozenset[str] = frozenset(
+    {"gemini-3.5-flash", "gemini-3.7-flash", "claude-opus-5"}
+)
 
 # Transport each per-run provider entry must pin: such an entry *replaces* oc's
 # built-in provider rather than merging, so without ``api`` oc falls back to the
 # OpenAI transport and 401s. ``google`` needs no ``baseUrl``; for ``google-vertex``
-# ``{location}`` is expanded by oc, so it stays literal here.
+# ``{location}`` is expanded by oc, so it stays literal here. ``anthropic-vertex``
+# cannot use that same ``{location}`` template: the plugin's real host shape for
+# the "global" region (and the "us"/"eu" multi-region aliases) is not
+# ``<region>-aiplatform.googleapis.com``, so its ``baseUrl`` is computed instead
+# (see :func:`_anthropic_vertex_base_url`) and filled in by :func:`_build_model_override`.
 _PROVIDER_TRANSPORT: dict[str, dict[str, str]] = {
     "google": {
         "api": "google-generative-ai",
@@ -148,6 +155,9 @@ _PROVIDER_TRANSPORT: dict[str, dict[str, str]] = {
     "google-vertex": {
         "api": "google-vertex",
         "baseUrl": "https://{location}-aiplatform.googleapis.com",
+    },
+    "anthropic-vertex": {
+        "api": "anthropic-messages",
     },
 }
 
@@ -160,6 +170,30 @@ _PROVIDER_TRANSPORT: dict[str, dict[str, str]] = {
 # scores 0.0. Denying both tools keeps the model doing the work itself in its
 # own turn instead of delegating into a dead end.
 _DENIED_TOOLS: tuple[str, ...] = ("sessions_spawn", "sessions_yield")
+
+
+def _anthropic_vertex_base_url(env: Mapping[str, str] | None = None) -> str:
+    """Compute the anthropic-vertex ``baseUrl`` for the current (or given) env.
+
+    Mirrors ``buildAnthropicVertexProvider`` in
+    ``@openclaw/anthropic-vertex-provider/dist/provider-catalog.js``: the region
+    comes from ``GOOGLE_CLOUD_LOCATION``, falling back to ``CLOUD_ML_REGION``,
+    defaulting to ``"global"`` when neither is set. The host shape differs by
+    region:
+
+    * ``"global"`` (or unset) -> ``https://aiplatform.googleapis.com``
+    * ``"us"`` / ``"eu"`` (multi-region aliases) ->
+      ``https://aiplatform.<region>.rep.googleapis.com``
+    * any other region -> ``https://<region>-aiplatform.googleapis.com``
+    """
+    env = os.environ if env is None else env
+    region = (env.get("GOOGLE_CLOUD_LOCATION") or env.get("CLOUD_ML_REGION") or "").strip().lower()
+    region = region or "global"
+    if region == "global":
+        return "https://aiplatform.googleapis.com"
+    if region in ("us", "eu"):
+        return f"https://aiplatform.{region}.rep.googleapis.com"
+    return f"https://{region}-aiplatform.googleapis.com"
 
 
 def _oc_model_id(config: AgentConfig) -> str:
@@ -240,6 +274,8 @@ def _build_model_override(config: AgentConfig) -> dict:
             f"{', '.join(sorted(_PROVIDER_TRANSPORT))})"
         )
     provider_entry: dict = dict(_PROVIDER_TRANSPORT[provider])
+    if provider == "anthropic-vertex":
+        provider_entry["baseUrl"] = _anthropic_vertex_base_url()
     provider_entry["models"] = [{"id": bare, "name": bare}]
     return {
         "models": {"providers": {provider: provider_entry}},
@@ -410,6 +446,14 @@ def _build_local_command(config: AgentConfig, prompt: str, agent_name: str, oc_b
     installed system-wide). Session state is isolated via ``OPENCLAW_STATE_DIR``
     (set by the caller's env overlay).
 
+    For ``anthropic-vertex`` runs, ``oc agent --local`` reads the gateway auth
+    store under ``OPENCLAW_STATE_DIR``, which is isolated per run and therefore
+    empty every run; it must be seeded before the turn with a stored auth
+    profile. openclaw refuses a hand-typed ``apiKey`` in the config JSON, so this
+    cannot be done in ``openclaw.json``. The profile only ever holds the
+    non-secret marker string ``gcp-vertex-credentials``; the real credential
+    comes from ADC at call time, so no secret is written to disk.
+
     Args:
         config: Resolved :class:`AgentConfig`.
         prompt: Task prompt for the agent (rules already prepended).
@@ -421,13 +465,26 @@ def _build_local_command(config: AgentConfig, prompt: str, agent_name: str, oc_b
         ``core.subprocess.run``.
     """
     quoted_oc = shlex.quote(oc_bin)
+    extra_flags_str = (
+        " ".join(shlex.quote(f) for f in config.extra_flags) + " " if config.extra_flags else ""
+    )
+    auth_seed = ""
+    if resolve_provider(config.provider).oc_provider == "anthropic-vertex":
+        auth_seed = (
+            f"printf '%s' {shlex.quote('gcp-vertex-credentials')} | "
+            f"{quoted_oc} models auth paste-api-key --provider "
+            f"{shlex.quote('anthropic-vertex')} >/dev/null || "
+            "echo 'bench: seeding anthropic-vertex auth profile failed' >&2; "
+        )
     return (
         # Source nvm so the Node-based oc binary's runtime is available. An
         # inherited NVM_DIR (custom install path) wins over the default.
         'export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"; '
         '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; '
+        f"{auth_seed}"
         f"{quoted_oc} --log-level debug agent --local "
-        f"--agent {shlex.quote(agent_name)} {_oc_model_flag(config)}-m {shlex.quote(prompt)}"
+        f"--agent {shlex.quote(agent_name)} {_oc_model_flag(config)}"
+        f"{extra_flags_str}-m {shlex.quote(prompt)}"
     )
 
 

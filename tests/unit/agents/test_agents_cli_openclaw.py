@@ -599,6 +599,7 @@ def test_build_openclaw_config_wraps_servers_under_mcp() -> None:
     assert cfg == {
         "mcp": {"servers": {"gke": {"command": "gke-mcp"}}},
         "tools": {"codeMode": False, "deny": ["sessions_spawn", "sessions_yield"]},
+        "memory": {"search": {"enabled": False}},
     }
 
 
@@ -741,6 +742,7 @@ def test_execute_writes_mcp_servers_into_isolated_config(
     assert captured["config"] == {
         "mcp": {"servers": {"gke": {"command": "gke-mcp"}}},
         "tools": {"codeMode": False, "deny": ["sessions_spawn", "sessions_yield"]},
+        "memory": {"search": {"enabled": False}},
     }
 
 
@@ -885,6 +887,7 @@ def test_build_openclaw_config_carries_only_code_mode_without_launchable_server_
     """No MCP binding and a catalog-known model → only ``tools.codeMode``/``deny``."""
     expected = {
         "tools": {"codeMode": False, "deny": ["sessions_spawn", "sessions_yield"]},
+        "memory": {"search": {"enabled": False}},
     }
     assert _build_openclaw_config(AgentConfig(), ()) == expected
     assert (
@@ -954,6 +957,16 @@ def test_build_openclaw_config_agent_runtime_does_not_clobber_model_override() -
 # Model catalog override: models oc doesn't ship by default get registered in
 # the per-run isolated config, for both google-genai and google-vertex.
 # ---------------------------------------------------------------------------
+
+
+def test_build_openclaw_config_disables_memory_search() -> None:
+    """openclaw 2026.8.x enables memory search by default, which both calls an
+    OpenAI embeddings endpoint the run never selected and lets one run recall a
+    previous run of the same task. A benchmark run must be stateless."""
+    payload = _build_openclaw_config(AgentConfig(), ())
+    assert payload["memory"] == {"search": {"enabled": False}}
+
+
 def test_execute_writes_code_mode_config_when_no_launchable_server(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -984,4 +997,5 @@ def test_execute_writes_code_mode_config_when_no_launchable_server(
     assert captured["cfg_path"]
     assert captured["config"] == {
         "tools": {"codeMode": False, "deny": ["sessions_spawn", "sessions_yield"]},
+        "memory": {"search": {"enabled": False}},
     }

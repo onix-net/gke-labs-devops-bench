@@ -316,6 +316,15 @@ def _build_openclaw_config(config: AgentConfig, mcp_servers: tuple[McpBinding, .
         "codeMode": _code_mode_enabled(),
         "deny": list(_DENIED_TOOLS),
     }
+    # openclaw 2026.8.x ships a memory subsystem that is ON by default. It has
+    # no place in a benchmark run for two reasons. It embeds every transcript
+    # through an OpenAI embeddings call, adding an outbound dependency (and
+    # spend) on a provider the run never selected and that the sandbox does not
+    # expect; and `rememberAcrossConversations` defaults on, so a second run of
+    # the same task can recall the first one's transcript and score on recall
+    # rather than on the cluster. Disabling the master toggle makes each run
+    # stateless, which is the only defensible baseline for scoring.
+    payload["memory"] = {"search": {"enabled": False}}
     # openclaw only discovers plugins bundled in its own dist/extensions or
     # named in plugins.load.paths, so an externally installed provider
     # package (e.g. anthropic-vertex) has to be named explicitly here.

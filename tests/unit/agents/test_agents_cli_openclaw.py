@@ -297,6 +297,14 @@ def test_build_local_command_omits_auth_seed_for_non_vertex_provider() -> None:
     assert "gcp-vertex-credentials" not in cmd
 
 
+def test_build_openclaw_config_disables_memory_search() -> None:
+    """openclaw 2026.8.x enables memory search by default, which both calls an
+    OpenAI embeddings endpoint the run never selected and lets one run recall a
+    previous run of the same task. A benchmark run must be stateless."""
+    payload = _build_openclaw_config(AgentConfig(), ())
+    assert payload["memory"] == {"search": {"enabled": False}}
+
+
 def test_pick_session_key_handles_top_level_list() -> None:
     payload = json.dumps([{"key": "agent:operator:abc", "model": "x"}])
     assert _pick_session_key(payload) == "agent:operator:abc"
@@ -712,6 +720,7 @@ def test_build_openclaw_config_wraps_servers_under_mcp() -> None:
     assert cfg == {
         "mcp": {"servers": {"gke": {"command": "gke-mcp"}}},
         "tools": {"codeMode": False, "deny": ["sessions_spawn", "sessions_yield"]},
+        "memory": {"search": {"enabled": False}},
     }
 
 
@@ -719,7 +728,10 @@ def test_build_openclaw_config_carries_only_code_mode_without_launchable_server_
     None
 ):
     """No MCP binding and a catalog-known model → only ``tools.codeMode``/``deny``."""
-    expected = {"tools": {"codeMode": False, "deny": ["sessions_spawn", "sessions_yield"]}}
+    expected = {
+        "tools": {"codeMode": False, "deny": ["sessions_spawn", "sessions_yield"]},
+        "memory": {"search": {"enabled": False}},
+    }
     assert _build_openclaw_config(AgentConfig(), ()) == expected
     assert _build_openclaw_config(
         AgentConfig(model="gemini-3.1-pro-preview"),
@@ -967,6 +979,7 @@ def test_execute_writes_mcp_servers_into_isolated_config(
     assert captured["config"] == {
         "mcp": {"servers": {"gke": {"command": "gke-mcp"}}},
         "tools": {"codeMode": False, "deny": ["sessions_spawn", "sessions_yield"]},
+        "memory": {"search": {"enabled": False}},
     }
 
 
@@ -999,7 +1012,8 @@ def test_execute_writes_code_mode_config_when_no_launchable_server(
     ).run("p")
     assert captured["cfg_path"]
     assert captured["config"] == {
-        "tools": {"codeMode": False, "deny": ["sessions_spawn", "sessions_yield"]}
+        "tools": {"codeMode": False, "deny": ["sessions_spawn", "sessions_yield"]},
+        "memory": {"search": {"enabled": False}},
     }
 
 

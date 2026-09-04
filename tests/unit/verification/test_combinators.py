@@ -551,3 +551,129 @@ def test_parallel_reason_distinguishes_errored_from_failed_children() -> None:
     )
     assert "[0] failed:" in result.reason
     assert "[1] errored:" in result.reason
+
+
+# --- converge polling: a deadline-truncated round must not erase a complete one ---
+#
+# Regression for the shape measured on b-8172 and four sibling tasks: an `any`
+# objective under converge whose final round starts at the deadline evaluates
+# child 0, skips child 1 as "error" (never observed), and _poll_rounds reported
+# that final round. _combine_disjunction then yields "error" rather than "fail",
+# and rollup withholds VerificationCorrectness for the whole run because an
+# objective errored. Earlier rounds HAD evaluated child 1, so the "unknown" the
+# error status claims is not true.
+
+
+def _round(status, *, success=False, child_statuses=()):
+    """One round's result, with children carrying the given statuses."""
+    return VerificationResult(
+        success=success,
+        elapsed_time=0.0,
+        reason="round",
+        name="any",
+        status=status,
+        children=[
+            VerificationResult(
+                success=(cs == "pass"),
+                elapsed_time=0.0,
+                reason=f"[{i}]",
+                name=f"c{i}",
+                status=cs,
+            )
+            for i, cs in enumerate(child_statuses)
+        ],
+    )
+
+
+def test_poll_rounds_reports_fail_not_error_when_an_earlier_round_was_complete():
+    seen = []
+
+    def run_round():
+        r = (
+            _round("fail", child_statuses=("fail", "fail"))
+            if not seen
+            else _round("error", child_statuses=("fail", "error"))
+        )
+        seen.append(r)
+        return r
+
+    # deadline in the future so poll_until runs more than one round
+    out = VerifierAgent._poll_rounds(run_round, time.monotonic() + 0.25)
+    assert len(seen) >= 2, "test needs at least two rounds to be meaningful"
+    assert out.status == "fail", (
+        "a round that saw every child and found them all false is a definite "
+        f"fail; got {out.status!r} from a deadline-truncated later round"
+    )
+
+
+def test_poll_rounds_still_reports_success_from_the_final_round():
+    seen = []
+
+    def run_round():
+        r = (
+            _round("fail", child_statuses=("fail", "fail"))
+            if not seen
+            else _round("pass", success=True, child_statuses=("pass", "fail"))
+        )
+        seen.append(r)
+        return r
+
+    out = VerifierAgent._poll_rounds(run_round, time.monotonic() + 0.25)
+    assert out.success is True and out.status == "pass"
+
+
+def test_poll_rounds_falls_back_to_last_when_no_round_was_ever_complete():
+    def run_round():
+        return _round("error", child_statuses=("fail", "error"))
+
+    out = VerifierAgent._poll_rounds(run_round, time.monotonic() + 0.05)
+    assert out.status == "error", "with no complete round there is nothing better to report"
+
+
+@VERIFIERS.register("slowfail")
+class _SlowFail(BaseVerifier):
+    """Fails, and burns enough time that the next child sees a passed deadline.
+
+    Models the real shape: child 0 is a live kubectl read that takes long
+    enough for the converge deadline to elapse while it runs, so the round's
+    remaining children are skipped.
+    """
+
+    type: Literal["slowfail"] = "slowfail"
+    sleep_for: float = 0.12
+    calls: int = 0
+
+    def verify(self, timeout_sec: float) -> VerificationResult:
+        self.calls += 1
+        time.sleep(self.sleep_for)
+        return VerificationResult(success=False, elapsed_time=0.0, reason="stub", name=self.name)
+
+
+def test_run_any_under_converge_reports_fail_not_error_through_the_real_path():
+    """End-to-end through _run_any: a truncated final round must not report error.
+
+    Exercises the path b-8172 hit: an `any` objective under converge whose
+    children all fail, where the final round starts close enough to the
+    deadline that child 1 is skipped as "error" (never observed). Earlier
+    rounds reached child 1, so the group's verdict is a definite fail.
+    """
+    node = parse_node(
+        {
+            "type": "any",
+            "checks": [
+                {"type": "slowfail", "sleep_for": 0.12, "name": "c0"},
+                {"type": "always", "ok": False, "name": "c1"},
+            ],
+        }
+    )
+    agent = VerifierAgent()
+    out = agent._run_any(node, time.monotonic() + 0.30)
+
+    assert out.success is False
+    assert out.status == "fail", (
+        "every child was reached in at least one round and all were false, so "
+        f"the group is a definite fail; got {out.status!r}"
+    )
+    assert not any(c.status == "error" for c in out.children), (
+        "the reported round must be one that reached every child"
+    )

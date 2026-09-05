@@ -504,15 +504,27 @@ class VerifierAgent:
         """
         start = time.monotonic()
         last: VerificationResult | None = None
+        last_complete: VerificationResult | None = None
 
         def predicate() -> bool:
-            nonlocal last
+            nonlocal last, last_complete
             last = run_round()
+            if not any(child.status == "error" for child in last.children):
+                last_complete = last
             return last.success
 
         poll_until(predicate, timeout_sec=max(0.0, deadline - time.monotonic()))
         assert last is not None  # predicate always runs at least once
-        return last.model_copy(update={"elapsed_time": time.monotonic() - start})
+        # A round truncated by the deadline marks its unreached children "error"
+        # (never observed), and _combine_disjunction reads any such child as
+        # "unknown: a passing child might still exist". That inference is sound
+        # for a single pass and false here, because an earlier round DID reach
+        # those children. Reporting the truncated round turns a definite fail
+        # into an error, and rollup withholds correctness for the whole run when
+        # an objective errors. So prefer the most recent round that reached
+        # every child; fall back to the last round when none ever did.
+        reported = last if last.success else (last_complete or last)
+        return reported.model_copy(update={"elapsed_time": time.monotonic() - start})
 
     def _run_parallel(
         self, node: ParallelSpec, deadline: float, *, single_shot: bool = False

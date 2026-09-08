@@ -748,7 +748,10 @@ class DefaultEvalHarness(Harness):
             :func:`devops_bench.verification.rollup.rollup` consumes, plus
             ``hold_sample_count`` / ``hold_error_count`` /
             ``hold_first_violation_reason`` / ``hold_first_violation_at_sec``
-            so the outcome is auditable from the report alone.
+            / ``hold_first_error_reason`` / ``hold_first_error_at_sec`` /
+            ``hold_trailing_error_count`` so the outcome is auditable from the
+            report alone, INCLUDING whether a fail-open window could have
+            hidden a violation.
         """
         success, status, reason = hold_verdict(obs if obs is not None else HoldObservation())
 
@@ -767,6 +770,15 @@ class DefaultEvalHarness(Harness):
             "hold_error_count": obs.error_count if obs is not None else 0,
             "hold_first_violation_reason": obs.first_violation_reason if obs is not None else None,
             "hold_first_violation_at_sec": obs.first_violation_at_sec if obs is not None else None,
+            # An errored sample fails OPEN and is reported as passing, so a
+            # reader has to be able to ask whether a violation could have
+            # happened inside the blind window. That needs the reason, the
+            # time, and whether the errors ran to the END of the window (a
+            # trailing run is the only shape that can hide a persistent
+            # violation; a mid-window blip cannot).
+            "hold_first_error_reason": obs.first_error_reason if obs is not None else None,
+            "hold_first_error_at_sec": obs.first_error_at_sec if obs is not None else None,
+            "hold_trailing_error_count": obs.trailing_error_count if obs is not None else 0,
         }
 
     # -- scenario (background chaos) --------------------------------------

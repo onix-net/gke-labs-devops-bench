@@ -174,6 +174,21 @@ class HoldObservation:
     first_violation_at_sec: float | None = None
     sample_count: int = 0
     error_count: int = 0
+    # Why the FIRST unevaluable sample could not be evaluated, and when.
+    #
+    # These exist because a hold audit could not previously be closed. An
+    # errored sample fails OPEN, so it is recorded as passing, and the only
+    # question that matters afterwards is whether a violation could have
+    # happened inside that blind window. Answering it needs to know WHEN the
+    # sample fell and WHY it failed, and both were discarded: the reason was
+    # dropped on the floor and no timestamp was taken at all. Every hold audit
+    # in this corpus hit the same wall and had to bound the answer by argument
+    # instead of reading it.
+    #
+    # Captured on the first error only, matching first_violation_reason, so a
+    # flapping check cannot flood the report.
+    first_error_reason: str | None = None
+    first_error_at_sec: float | None = None
     last_sample_status: str | None = None
     trailing_error_count: int = 0
 
@@ -194,7 +209,7 @@ def _fold_sample(obs: HoldObservation, result: VerificationResult, elapsed_sec: 
             taken, recorded on the first violation only.
     """
     if result.status == "error":
-        _fold_error_sample(obs)
+        _fold_error_sample(obs, reason=result.reason, elapsed_sec=elapsed_sec)
         return
     obs.sample_count += 1
     obs.last_sample_status = result.status
@@ -205,7 +220,11 @@ def _fold_sample(obs: HoldObservation, result: VerificationResult, elapsed_sec: 
         obs.first_violation_at_sec = elapsed_sec
 
 
-def _fold_error_sample(obs: HoldObservation) -> None:
+def _fold_error_sample(
+    obs: HoldObservation,
+    reason: str | None = None,
+    elapsed_sec: float | None = None,
+) -> None:
     """Record one sample that could not be evaluated at all.
 
     Exists so an exception raised while sampling (the check never even ran)
@@ -214,13 +233,25 @@ def _fold_error_sample(obs: HoldObservation) -> None:
     updating the fields directly, so the two cases can never drift out of
     sync.
 
+    ``reason`` and ``elapsed_sec`` are captured on the FIRST error only. An
+    errored sample fails open, so the only question that matters later is
+    whether a violation could have occurred inside that blind window; without
+    a reason and a timestamp that question can only be bounded by argument.
+    Both arguments are optional so an exception-path caller that has no
+    VerificationResult can still fold a sample in.
+
     Args:
         obs: The observation to update in place.
+        reason: Why this sample could not be evaluated, if known.
+        elapsed_sec: Seconds into the observation window, if known.
     """
     obs.sample_count += 1
     obs.error_count += 1
     obs.last_sample_status = "error"
     obs.trailing_error_count += 1
+    if obs.first_error_reason is None and obs.first_error_at_sec is None:
+        obs.first_error_reason = reason
+        obs.first_error_at_sec = elapsed_sec
 
 
 def hold_verdict(obs: HoldObservation) -> tuple[bool, str, str]:
@@ -420,7 +451,9 @@ class SafeguardMonitor:
             _log.warning("safeguard monitor: sampling %r raised: %s", entry.name, exc)
             with self._lock:
                 obs = self._observations[entry.name]
-                _fold_error_sample(obs)
+                _fold_error_sample(
+                    obs, reason=f"sampling raised: {exc}", elapsed_sec=elapsed
+                )
             return
 
         with self._lock:

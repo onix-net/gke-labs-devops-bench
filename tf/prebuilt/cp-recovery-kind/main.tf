@@ -75,6 +75,13 @@ resource "helm_release" "workloads" {
   namespace        = var.namespace
   create_namespace = true
 
+  # The provider's 300s default is not enough here: the chart's workloads have
+  # to pull and become ready on a kind cluster that was itself created moments
+  # earlier, and a miss surfaces as "context deadline exceeded" with the run
+  # dying in provisioning before the agent starts.
+  timeout = 900
+  wait    = true
+
   set {
     name  = "namespace"
     value = var.namespace

@@ -67,6 +67,7 @@ _resolve_tf_root = resolve_tf_root
 # The real fix should keep live progress (tee, or capture stderr only) rather
 # than trading streaming for diagnosability the way this does.
 
+
 def _format_var(value: Any) -> str:
     """Format a Python value as an OpenTofu ``-var`` literal.
 

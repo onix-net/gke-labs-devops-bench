@@ -123,12 +123,17 @@ def test_kill_container_never_raises_when_docker_kill_fails(
 def test_sweep_stray_containers_kills_only_matching_names(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("BENCH_AGENT_SANDBOX_OWNER", "attemptA")
     calls: list[list[str]] = []
 
     def fake_run(argv, **kwargs):
         calls.append(argv)
         if argv[:2] == ["docker", "ps"]:
-            return SimpleNamespace(returncode=0, stdout="abc123\ndef456\n", stderr="")
+            return SimpleNamespace(
+                returncode=0,
+                stdout="devops-bench-agent-attemptA-ws\ndevops-bench-agent-attemptAB-ws\ndevops-bench-agent-legacy\n",
+                stderr="",
+            )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(sandbox, "run", fake_run)
@@ -136,9 +141,9 @@ def test_sweep_stray_containers_kills_only_matching_names(
 
     list_call = calls[0]
     assert list_call[0:2] == ["docker", "ps"]
-    assert any("devops-bench-agent-" in arg for arg in list_call)
+    assert "{{.Names}}" in list_call
     kill_calls = [c for c in calls if c[:2] == ["docker", "kill"]]
-    assert kill_calls == [["docker", "kill", "abc123"], ["docker", "kill", "def456"]]
+    assert kill_calls == [["docker", "kill", "devops-bench-agent-attemptA-ws"]]
 
 
 def test_sweep_stray_containers_handles_docker_ps_failure_without_raising(
@@ -739,9 +744,7 @@ def test_executor_run_chowns_workspace_and_fixtures_around_a_remapped_run(
     mount (fixtures live outside the workspace, in the operator's home)."""
     fixture = tmp_path / "fixture-repo"
     fixture.mkdir()
-    spec = _complete_spec(
-        tmp_path, fixture_mounts={str(fixture): "/workspace/home/fixture-repo"}
-    )
+    spec = _complete_spec(tmp_path, fixture_mounts={str(fixture): "/workspace/home/fixture-repo"})
     executor = sandbox.SandboxExecutor(spec)
     monkeypatch.setattr(sandbox.sys, "platform", "linux")
     monkeypatch.setattr(sandbox.os, "getuid", lambda: 3998470835)
@@ -766,7 +769,9 @@ def test_executor_run_chowns_workspace_and_fixtures_around_a_remapped_run(
     assert f"{spec.workspace}:/workspace" in post
     assert f"{fixture}:/workspace/home/fixture-repo" in post
 
-    agent_call = next(call for call in calls if "chown" not in call and call[:2] == ["docker", "run"])
+    agent_call = next(
+        call for call in calls if "chown" not in call and call[:2] == ["docker", "run"]
+    )
     assert agent_call[agent_call.index("--user") + 1] == "1000:1000"
 
 
@@ -1037,3 +1042,23 @@ def test_every_cli_harness_declares_sandbox_support() -> None:
 
     for cls in (AgyCliAgent, ClaudeCodeAgent, GeminiCliAgent, OpenClawAgent):
         assert cls.supports_sandbox is True, f"{cls.__name__} is not wired onto the seam"
+
+
+def test_unscoped_sweep_never_touches_other_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("BENCH_AGENT_SANDBOX_OWNER", raising=False)
+    monkeypatch.setattr(sandbox, "run", lambda *a, **kw: pytest.fail("unscoped docker call"))
+    sandbox.sweep_stray_containers()
+
+
+def test_owner_is_part_of_container_name(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("BENCH_AGENT_SANDBOX_OWNER", "attemptA")
+    assert sandbox.container_name_for_workspace(tmp_path).startswith("devops-bench-agent-attemptA-")
+    monkeypatch.setenv("BENCH_AGENT_SANDBOX_OWNER", "bad-owner")
+    with pytest.raises(ValueError):
+        sandbox.container_name_for_workspace(tmp_path)
+
+
+def test_remap_covers_external_generated_kubeconfig(tmp_path: Path) -> None:
+    spec = _complete_spec(tmp_path)
+    executor = sandbox.SandboxExecutor(spec)
+    assert (str(spec.kubeconfig), sandbox.CONTAINER_KUBECONFIG) in executor._remap_mounts()

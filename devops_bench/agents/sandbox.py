@@ -52,6 +52,7 @@ the agent on the host.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -612,12 +613,16 @@ class SandboxExecutor:
     def _remap_mounts(self) -> list[tuple[str, str]]:
         """Host path -> container path for every mount a chown pass must cover.
 
-        The workspace plus every fixture mount (see ``discover_fixture_mounts``):
+        The workspace, the generated kubeconfig, and every fixture mount (see ``discover_fixture_mounts``):
         fixtures live outside the workspace, in the operator's home, so a chown
         of the workspace alone would strand them exactly as un-owned as before.
         """
         spec = self.spec
-        return [(str(spec.workspace), CONTAINER_WORKSPACE), *spec.fixture_mounts.items()]
+        return [
+            (str(spec.workspace), CONTAINER_WORKSPACE),
+            (str(spec.kubeconfig), CONTAINER_KUBECONFIG),
+            *spec.fixture_mounts.items(),
+        ]
 
     def _chown_argv(self, uid: int, gid: int) -> list[str]:
         """``docker run`` argv for a throwaway root container that chowns every
@@ -814,11 +819,14 @@ def container_name_for_workspace(workspace: Path) -> str:
     """Deterministic ``docker run --name`` for one run's sandboxed agent.
 
     Ties the container 1:1 to the run's own workspace directory name (already
-    unique per run), so a reaper can find and kill a stray container purely
-    from its name, without threading a separate run id through the agent
-    harness.
+    unique per run: it comes from ``mint_dir(...)`` / ``TemporaryDirectory``),
+    so a reaper can find and kill a stray container purely from its name,
+    without threading a separate run id through the agent harness.
     """
-    return f"{_CONTAINER_NAME_PREFIX}{workspace.name}"
+    owner = os.environ.get("BENCH_AGENT_SANDBOX_OWNER", "")
+    if owner and not re.fullmatch(r"[A-Za-z0-9_]{1,128}", owner):
+        raise ValueError("BENCH_AGENT_SANDBOX_OWNER must be a unique alphanumeric attempt ID")
+    return f"{_CONTAINER_NAME_PREFIX}{owner + '-' if owner else ''}{workspace.name}"
 
 
 def kill_container(name: str) -> None:
@@ -833,27 +841,21 @@ def kill_container(name: str) -> None:
 
 
 def sweep_stray_containers() -> None:
-    """Best-effort reap of containers this harness left running from a prior run.
+    """Reap only the explicitly selected attempt's leftovers.
 
-    Intended to run once at harness start (before any run's own container
-    exists) so a container orphaned by a prior crash or a killed harness
-    process gets cleaned up before it burns any more quota. Matches
-    exclusively on this benchmark's own name prefix, so it can never reap a
-    container some other tool created — but the prefix is shared across
-    benchmark processes, so this assumes it is the only harness on the host:
-    a *sibling* harness's live agent container matches too. Callers running
-    parallel harnesses must not sweep (see the eval harness's
-    ``BENCH_PARALLEL`` gate).
+    A shared name prefix is not proof that another process has exited. Legacy
+    unscoped containers require explicit operator recovery; never sweep them here.
+    The owner ID must be unique per attempt and must not be reused concurrently.
     """
-    listed = run(
-        ["docker", "ps", "-q", "--filter", f"name=^{_CONTAINER_NAME_PREFIX}"],
-        check=False,
-    )
+    owner = os.environ.get("BENCH_AGENT_SANDBOX_OWNER", "")
+    if not owner:
+        return
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,128}", owner):
+        raise ValueError("BENCH_AGENT_SANDBOX_OWNER must be a unique alphanumeric attempt ID")
+    prefix = f"{_CONTAINER_NAME_PREFIX}{owner}-"
+    listed = run(["docker", "ps", "--format", "{{.Names}}"], check=False)
     if listed.returncode != 0:
         return
-    for container_id in (listed.stdout or "").split():
-        result = run(["docker", "kill", container_id], check=False)
-        if result.returncode == 0:
-            _log.warning(
-                "reaped stray sandbox container %s left running from a prior run", container_id
-            )
+    for name in (listed.stdout or "").splitlines():
+        if name.startswith(prefix):
+            kill_container(name)

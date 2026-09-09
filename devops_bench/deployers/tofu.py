@@ -54,6 +54,19 @@ _log = get_logger("deployers.tofu")
 _resolve_tf_root = resolve_tf_root
 
 
+# LOCAL DEBUG CHANGE, not for upstream as-is.
+#
+# These calls used capture=False, which streams tofu output to the worker's
+# stdout and leaves SubprocessError.stdout/stderr as None. On a remote executor
+# that stdout dies with the VM, so a failed apply surfaces only as
+#   "command failed with exit code 1: tofu apply ..."
+# with no reason attached, which makes provisioning failures undiagnosable
+# after the fact. Capturing means the reason travels with the error into
+# results.json.
+#
+# The real fix should keep live progress (tee, or capture stderr only) rather
+# than trading streaming for diagnosability the way this does.
+
 def _format_var(value: Any) -> str:
     """Format a Python value as an OpenTofu ``-var`` literal.
 
@@ -258,7 +271,7 @@ class TFDeployer(Deployer):
             raise ConfigError(f"TF directory not found: {self.work_dir} (stack: {self.tf_dir})")
 
         self.provider.ensure_account_credentials()
-        run(["tofu", "init", "-input=false"], cwd=self.work_dir, capture=False)
+        run(["tofu", "init", "-input=false"], cwd=self.work_dir, capture=True)
 
         state_flags = self._state_flags()
         cmd = [
@@ -269,7 +282,7 @@ class TFDeployer(Deployer):
             *state_flags,
             *self._var_flags(),
         ]
-        run(cmd, cwd=self.work_dir, capture=False)
+        run(cmd, cwd=self.work_dir, capture=True)
         self._restrict_state_permissions(state_flags)
 
     @staticmethod
@@ -331,7 +344,7 @@ class TFDeployer(Deployer):
                 return
 
             self.provider.ensure_account_credentials()
-            run(["tofu", "init", "-input=false"], cwd=self.work_dir, capture=False)
+            run(["tofu", "init", "-input=false"], cwd=self.work_dir, capture=True)
 
             cmd = [
                 "tofu",
@@ -341,7 +354,7 @@ class TFDeployer(Deployer):
                 *self._state_flags(),
                 *self._var_flags(),
             ]
-            run(cmd, cwd=self.work_dir, capture=False)
+            run(cmd, cwd=self.work_dir, capture=True)
             destroy_success = True
         finally:
             self.provider.cleanup(cluster_info, variables=self.variables, success=destroy_success)
@@ -358,7 +371,7 @@ class TFDeployer(Deployer):
         Raises:
             ConfigError: If required outputs are missing or unparseable.
         """
-        run(["tofu", "init", "-input=false"], cwd=self.work_dir, capture=False)
+        run(["tofu", "init", "-input=false"], cwd=self.work_dir, capture=True)
 
         result = run(
             ["tofu", "output", "-json", *self._state_flags()],

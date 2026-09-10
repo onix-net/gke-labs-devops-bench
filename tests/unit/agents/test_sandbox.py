@@ -1016,3 +1016,30 @@ def test_invalid_wrap_never_changes_mount_ownership(
     with pytest.raises(SandboxError):
         executor.run(["agent"], cwd=tmp_path / "outside")
     assert not calls
+
+
+def test_executor_run_handback_failure_does_not_mask_a_successful_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failed handback chown is logged with the literal repair command, but
+    a real agent result must still come back to the caller."""
+    executor = sandbox.SandboxExecutor(_complete_spec(tmp_path))
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox.os, "getuid", lambda: 3998470835)
+    monkeypatch.setattr(sandbox.os, "getgid", lambda: 1000)
+
+    def fake_run(argv, **kwargs):
+        if argv[:2] == ["docker", "kill"]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="No such container")
+        if "chown" in argv and "3998470835:1000" in argv:
+            raise SubprocessError(argv, returncode=1, stdout="", stderr="boom")
+        return SimpleNamespace(returncode=0, stdout="agent output", stderr="")
+
+    monkeypatch.setattr(sandbox, "run", fake_run)
+    with caplog.at_level("ERROR"):
+        result = executor.run(["gemini"], check=False)
+
+    assert result.stdout == "agent output"
+    assert "docker run --rm" in caplog.text
+    assert "chown" in caplog.text
+    assert "3998470835:1000" in caplog.text

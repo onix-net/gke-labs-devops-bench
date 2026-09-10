@@ -685,16 +685,18 @@ class SandboxExecutor:
             raise SandboxError(
                 "the sandboxed agent runs without stdin (no -i, by design); input= is unsupported"
             )
+        wrapped = self.wrap_argv(cmd, cwd=cwd, extra_env=extra_env)
         remap = sys.platform.startswith("linux") and self._needs_id_remap()
         if remap:
             self._chown_before_remap()
-        wrapped = self.wrap_argv(cmd, cwd=cwd, extra_env=extra_env)
         try:
             return run(wrapped, check=check, capture=capture, text=text, timeout=timeout)
         finally:
-            if remap:
-                self._chown_after_remap()
-            kill_container(self.container_name)
+            try:
+                kill_container(self.container_name)
+            finally:
+                if remap:
+                    self._chown_after_remap()
 
 
 def container_name_for_workspace(workspace: Path) -> str:

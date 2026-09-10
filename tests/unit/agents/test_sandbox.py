@@ -976,3 +976,43 @@ def _ordinary_host_ids(monkeypatch: pytest.MonkeyPatch) -> None:
             getgid=lambda: 1000,
         ),
     )
+
+
+def test_remap_timeout_stops_agent_before_restoring_ownership(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    executor = sandbox.SandboxExecutor(_complete_spec(tmp_path))
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox.os, "getuid", lambda: 3998470835)
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        calls.append(argv)
+        if argv[:2] == ["docker", "run"] and "chown" not in argv:
+            raise SubprocessError(argv, returncode=-1, stdout="", stderr="timeout")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(sandbox, "run", fake_run)
+    with pytest.raises(SubprocessError):
+        executor.run(["agent"], timeout=1)
+    killed = next(i for i, argv in enumerate(calls) if argv[:2] == ["docker", "kill"])
+    restored = next(i for i, argv in enumerate(calls) if "3998470835:1000" in argv)
+    assert killed < restored
+
+
+def test_invalid_wrap_never_changes_mount_ownership(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    executor = sandbox.SandboxExecutor(_complete_spec(tmp_path))
+    monkeypatch.setattr(sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(sandbox.os, "getuid", lambda: 3998470835)
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(sandbox, "run", fake_run)
+    with pytest.raises(SandboxError):
+        executor.run(["agent"], cwd=tmp_path / "outside")
+    assert not calls

@@ -33,7 +33,7 @@ what is present:
 * a generated single-cluster **kubeconfig**, read-only at ``/creds/kubeconfig``:
   one cluster, one context, no ``exec:`` plugin blocks, never the operator's
   own kubeconfig or Application Default Credentials
-* an explicit **env overlay**, passed by value as ``-e`` flags after a deny
+* an explicit **env overlay**, passed by name as ``-e`` flags after a deny
   filter — never scraped from ``os.environ``
 
 Never in the container: the repo checkout, ``results/``, operator ``$HOME``,
@@ -454,7 +454,7 @@ def filter_boundary_env(
             (container-owned names excepted).
 
     Returns:
-        The filtered mapping that becomes ``-e`` flags.
+        The filtered mapping supplied to the Docker client environment.
     """
     kept: dict[str, str] = {}
     for name, value in (overlay or {}).items():
@@ -607,7 +607,8 @@ class SandboxExecutor:
         operator-owned (Docker Desktop already remaps ownership on macOS); the
         four-mount set (workspace RW, kubeconfig RO, fixtures RW — the write
         bit is deliberate, several tasks ask the agent to commit its fix back
-        to the seeded repo); the filtered env overlay by value, then the
+        to the seeded repo); filtered env overlay names (values come from the
+        Docker client environment, never logged argv), then the
         container-owned ``HOME``/``KUBECONFIG`` last so they win any
         duplicate ``-e``; and **no ``-i``** — keeping stdin open gives the
         agent an open, non-TTY stdin to block on, and a headless prompt run
@@ -629,8 +630,8 @@ class SandboxExecutor:
         argv += ["-v", f"{spec.kubeconfig}:{CONTAINER_KUBECONFIG}:ro"]
         for host_path, container_path in spec.fixture_mounts.items():
             argv += ["-v", f"{host_path}:{container_path}"]
-        for name, value in filter_boundary_env(extra_env, spec.env_allowlist).items():
-            argv += ["-e", f"{name}={value}"]
+        for name in filter_boundary_env(extra_env, spec.env_allowlist):
+            argv += ["-e", name]
         # Container-owned env comes AFTER the overlay: docker's last ``-e``
         # wins, so even a filter regression could not let an overlay value
         # repoint HOME or the credential path inside the boundary.
@@ -690,7 +691,14 @@ class SandboxExecutor:
         if remap:
             self._chown_before_remap()
         try:
-            return run(wrapped, check=check, capture=capture, text=text, timeout=timeout)
+            return run(
+                wrapped,
+                extra_env=filter_boundary_env(extra_env, self.spec.env_allowlist),
+                check=check,
+                capture=capture,
+                text=text,
+                timeout=timeout,
+            )
         finally:
             try:
                 kill_container(self.container_name)

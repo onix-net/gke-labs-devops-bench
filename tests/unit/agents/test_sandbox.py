@@ -452,10 +452,10 @@ def test_wrap_argv_core_shape(tmp_path: Path) -> None:
     # Mount set: workspace RW, kubeconfig RO.
     assert f"{spec.workspace}:/workspace" in argv
     assert f"{spec.kubeconfig}:/creds/kubeconfig:ro" in argv
-    # Env: container-owned vars plus the filtered overlay, by value.
+    # Env: container-owned values plus filtered overlay names; no key in argv.
     assert "HOME=/workspace/home" in argv
     assert "KUBECONFIG=/creds/kubeconfig" in argv
-    assert "GEMINI_API_KEY=k" in argv
+    assert "GEMINI_API_KEY" in argv
     # Default working directory is the workspace; image then the raw argv.
     assert argv[argv.index("-w") + 1] == "/workspace"
     assert argv[-4:] == ["agent-image", "gemini", "-p", "hi"]
@@ -467,8 +467,8 @@ def test_wrap_argv_container_owned_env_flags_come_last(tmp_path: Path) -> None:
     last-one-wins keeps them authoritative no matter what crossed."""
     executor = sandbox.SandboxExecutor(_complete_spec(tmp_path))
     argv = executor.wrap_argv(["gemini"], extra_env={"GEMINI_API_KEY": "k"})
-    assert argv.index("HOME=/workspace/home") > argv.index("GEMINI_API_KEY=k")
-    assert argv.index("KUBECONFIG=/creds/kubeconfig") > argv.index("GEMINI_API_KEY=k")
+    assert argv.index("HOME=/workspace/home") > argv.index("GEMINI_API_KEY")
+    assert argv.index("KUBECONFIG=/creds/kubeconfig") > argv.index("GEMINI_API_KEY")
 
 
 def test_wrap_argv_never_forwards_denied_env(tmp_path: Path) -> None:
@@ -1043,3 +1043,50 @@ def test_executor_run_handback_failure_does_not_mask_a_successful_result(
     assert "docker run --rm" in caplog.text
     assert "chown" in caplog.text
     assert "3998470835:1000" in caplog.text
+
+
+@pytest.mark.parametrize("outcome", ["success", "timeout", "nonzero"])
+def test_secret_overlay_never_enters_docker_argv_logs_or_exceptions(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture, outcome: str
+) -> None:
+    """Exercise the real subprocess wrapper, replacing only the OS execution."""
+    import logging
+    import os
+    import subprocess
+    import traceback
+
+    from devops_bench.core import subprocess as process
+
+    sentinel = "test-sentinel-not-a-real-credential"
+    monkeypatch.setenv("OPENAI_API_KEY", "stale-parent-value")
+    monkeypatch.setenv("UNSELECTED_CREDENTIAL", "unselected-parent-value")
+    before = dict(os.environ)
+    executor = sandbox.SandboxExecutor(_complete_spec(tmp_path))
+    monkeypatch.setattr(executor, "_needs_id_remap", lambda: False)
+    captured: dict = {}
+
+    def fake_os_run(argv, **kwargs):
+        if argv[:2] == ["docker", "kill"]:
+            return subprocess.CompletedProcess(argv, 1, "", "already gone")
+        captured.update(argv=argv, env=kwargs["env"])
+        if outcome == "timeout":
+            raise subprocess.TimeoutExpired(argv, 1, output="partial", stderr="timeout")
+        return subprocess.CompletedProcess(argv, 2 if outcome == "nonzero" else 0, "", "")
+
+    monkeypatch.setattr(process.subprocess, "run", fake_os_run)
+    with caplog.at_level(logging.DEBUG):
+        try:
+            executor.run(
+                ["agent", "--prompt", "hi"], extra_env={"OPENAI_API_KEY": sentinel}, timeout=1
+            )
+        except SubprocessError:
+            assert outcome != "success"
+            assert sentinel not in traceback.format_exc()
+        else:
+            assert outcome == "success"
+    assert sentinel not in repr(captured["argv"])
+    assert "OPENAI_API_KEY" in captured["argv"]
+    assert "UNSELECTED_CREDENTIAL" not in captured["argv"]
+    assert captured["env"]["OPENAI_API_KEY"] == sentinel
+    assert sentinel not in caplog.text
+    assert dict(os.environ) == before

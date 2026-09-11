@@ -32,6 +32,10 @@ _log = get_logger("chaos.agent")
 # Safety bound on the agent loop so a misbehaving model cannot spin forever.
 _MAX_TURNS = 8
 
+# Bound command output before it enters history: one noisy load spike can
+# otherwise overflow the model context even on the second turn.
+_MAX_TOOL_OUTPUT_CHARS = 32_000
+
 #: Signature of a chaos command handler: ``(command, chaos_active_event) -> str``.
 #: Concrete faults implement this and pass it to :class:`ChaosAgent` — see
 #: :func:`devops_bench.chaos.faults.generate_load.run_chaos_command`.
@@ -115,7 +119,8 @@ class ChaosAgent:
             call_id: Provider-supplied call id (unused; surfaced by the loop).
 
         Returns:
-            The handler's textual result, or an ``"Error: ..."`` description.
+            The handler's textual result, truncated to 32,000 characters with
+            its head and tail retained, or an ``"Error: ..."`` description.
         """
         if not isinstance(args, dict):
             return "Error: tool args must be an object"
@@ -125,4 +130,15 @@ class ChaosAgent:
         command = args.get("command", "")
         if not isinstance(command, str):
             return "Error: command must be a string"
-        return self._tool_handler(command, self._chaos_active_event)
+        output = self._tool_handler(command, self._chaos_active_event)
+        if len(output) <= _MAX_TOOL_OUTPUT_CHARS:
+            return output
+        marker = f"\n... [tool output truncated; original length: {len(output)} characters] ...\n"
+        retained = _MAX_TOOL_OUTPUT_CHARS - len(marker)
+        head = retained // 2
+        _log.warning(
+            "chaos tool output truncated from %d to %d characters",
+            len(output),
+            _MAX_TOOL_OUTPUT_CHARS,
+        )
+        return output[:head] + marker + output[-(retained - head) :]

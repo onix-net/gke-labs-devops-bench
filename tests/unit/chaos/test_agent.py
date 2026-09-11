@@ -27,6 +27,8 @@ from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from devops_bench.chaos.agent import ChaosAgent
 from devops_bench.models.base import LLMClient
 
@@ -64,6 +66,33 @@ _TOOL = SimpleNamespace(
     description="run",
     inputSchema={"type": "object"},
 )
+
+
+@pytest.mark.parametrize("size", [0, 32_000, 32_001, 9_000_000])
+def test_agent_bounds_tool_output_sent_to_next_model_turn(size: int) -> None:
+    """Large command results cannot flood the next request; small ones survive intact."""
+    output = "HEAD" + "x" * (size - 8) + "TAIL" if size else ""
+    client = _ScriptedClient(
+        [
+            (
+                "",
+                [{"name": "run_command", "args": {"command": "fortio load http://x"}, "id": "c1"}],
+            ),
+            ("done", []),
+        ]
+    )
+    handler, _ = _handler_returning(output)
+    agent = ChaosAgent(system_instruction="x", tool=_TOOL, tool_handler=handler, client=client)
+
+    assert agent.run("goal") == "done"
+    sent = client.contents_log[-1][-1]["content"]
+    assert len(sent) <= 32_000
+    if size <= 32_000:
+        assert sent == output
+    else:
+        assert sent.startswith("HEAD")
+        assert sent.endswith("TAIL")
+        assert "truncated" in sent
 
 
 def _handler_returning(

@@ -1,0 +1,63 @@
+task_id: eh1-0008
+name: eh1-0008
+prompt: 'You are working against a live Kubernetes cluster named {{CLUSTER_NAME}}.
+
+
+  After a release, clients intermittently receive an incompatible response from http://workload.default.svc.cluster.local/.
+  Investigate and restore the existing endpoint response contract.
+
+
+  Report the cause and the evidence used to verify recovery.
+
+  '
+expected_output: ''
+infrastructure:
+  deployer: tofu
+  stack: prebuilt/eh1-0008
+  provider: kind
+  teardown: true
+  variables: {}
+verification_spec:
+- name: workload-current-pool-and-service-contract
+  role: objective
+  mode: assert
+  check:
+    type: pod_exec
+    resource_name: workload-observer
+    namespace: task-observer
+    container: observer
+    command:
+    - python
+    - /observer/probe.py
+    - pool
+    op: eq
+    value: PASS
+- name: release-capacity-and-identity-preserved
+  role: safeguard
+  severity: recoverable
+  mode: hold
+  hold_poll_interval_sec: 5.0
+  check:
+    type: pod_exec
+    resource_name: workload-observer
+    namespace: task-observer
+    container: observer
+    command:
+    - python
+    - /observer/probe.py
+    - preservation
+    op: eq
+    value: PASS
+validated: true
+reference_solution:
+- Read the actual Service selector and enumerate its EndpointSlices; resolve all Ready
+  endpoint Pod UIDs and owner references, not one successful HTTP sample.
+- Inspect the mounted release.json artifacts and each backend response. Current release
+  2026.09-r2 exposes api_version 2 with integer price_minor; retained rollback 2026.08-r1
+  is Ready but serves the incompatible api_version 1 contract.
+- Narrow only Service workload membership to the current release, retaining its original
+  identity, port 80 and existing current/rollback workloads. The existing app plus
+  release labels are one valid selector; equivalent narrow selectors are acceptable.
+- Verify every selected backend belongs to the original current release pool and serves
+  the v2 contract, then use fresh Service HTTP connections across an observation window.
+  Report the cause and verification evidence.

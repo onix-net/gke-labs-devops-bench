@@ -1,0 +1,33 @@
+workloads:
+- namespace: default
+  kind: Deployment
+  name: workload-current
+  ready: 2/2
+  replicas: 2
+  pods:
+  - owner: workload-current
+    ready: 1/1
+    status: Running
+  - owner: workload-current
+    ready: 1/1
+    status: Running
+- namespace: default
+  kind: Deployment
+  name: workload-retained
+  ready: 1/1
+  replicas: 1
+  pods:
+  - owner: workload-retained
+    ready: 1/1
+    status: Running
+services:
+- namespace: default
+  name: workload
+  type: ClusterIP
+configmaps:
+- namespace: default
+  name: workload-release-r2
+- namespace: default
+  name: workload-release-r1
+secrets: []
+events: []

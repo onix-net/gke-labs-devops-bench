@@ -1151,8 +1151,9 @@ def test_agent_config_snapshot_has_no_sandbox_when_flag_off(
     assert harness.build_agent_config().sandbox is None
 
 
+@pytest.mark.parametrize("agent_rbac", ["benchmark", "task"])
 def test_prepare_sandbox_spec_completes_the_skeletal_spec(
-    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    isolated_env: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_rbac: str
 ) -> None:
     from devops_bench.core import ClusterInfo, NetworkPlan
 
@@ -1160,9 +1161,10 @@ def test_prepare_sandbox_spec_completes_the_skeletal_spec(
     plan = NetworkPlan(docker_network="kind", rewrite_server="https://c1-control-plane:6443")
     kubeconfig = tmp_path / "creds" / "kubeconfig"
     provider = object()
+    selected_mode = agent_rbac
 
     def fake_provision(
-        got_plan: Any, dest_dir: Path, *, token_ttl_sec: int, pod_security: str
+        got_plan: Any, dest_dir: Path, *, token_ttl_sec: int, pod_security: str, agent_rbac: str
     ) -> Path:
         assert got_plan is plan
         assert dest_dir == tmp_path / "creds"
@@ -1170,6 +1172,7 @@ def test_prepare_sandbox_spec_completes_the_skeletal_spec(
         # must outlast the run it is minted for.
         assert token_ttl_sec == 1500
         assert pod_security == "baseline"
+        assert agent_rbac == selected_mode
         return kubeconfig
 
     plan_requests: list[tuple[Any, str]] = []
@@ -1194,7 +1197,7 @@ def test_prepare_sandbox_spec_completes_the_skeletal_spec(
     workspace.mkdir()
     (tmp_path / "creds").mkdir()
     spec = harness._prepare_sandbox_spec(  # noqa: SLF001
-        workspace, tmp_path / "creds", ClusterInfo(name="c1"), provider, "baseline"
+        workspace, tmp_path / "creds", ClusterInfo(name="c1"), provider, "baseline", agent_rbac
     )
 
     # The sandbox home exists on the host before the agent runs (it is both
@@ -1681,3 +1684,32 @@ def test_no_other_task_opts_out_of_the_sandbox() -> None:
         if (_yaml.safe_load(p.read_text(encoding="utf-8")) or {}).get("requires_unsandboxed")
     ]
     assert exempt == ["secret-rotation"]
+
+
+def test_run_one_propagates_loaded_task_rbac_before_agent_execution(
+    isolated_env: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A task-owned declaration must reach sandbox setup, not just its helper API."""
+    from devops_bench.core import SandboxError
+
+    harness = _sandboxed_harness(monkeypatch, tmp_path)
+    modes: list[str] = []
+
+    def refuse_after_recording(
+        workspace: Path,
+        creds_dir: Path,
+        cluster: object,
+        provider: object,
+        pod_security: str,
+        agent_rbac: str = "benchmark",
+    ) -> None:
+        modes.append(agent_rbac)
+        raise SandboxError("test stops before agent or cluster access")
+
+    monkeypatch.setattr(harness, "_prepare_sandbox_spec", refuse_after_recording)
+    task = Task.from_dict(
+        {"name": "task-owned", "agent_rbac": "task", "infrastructure": {"deployer": "noop"}}
+    )
+    result = harness._run_one(task, tmp_path)  # noqa: SLF001
+    assert modes == ["task"]
+    assert result["status"] == "failed"

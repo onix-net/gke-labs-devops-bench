@@ -136,6 +136,10 @@ class Task(BaseModel):
             Only set ``"privileged"`` for a task whose own subject matter is
             privileged workloads -- it removes the control that denies the
             privileged-pod and hostPath escape.
+        agent_rbac: ``"benchmark"`` provisions the benchmark's default grants;
+            ``"task"`` requires a pre-existing task-owned solver identity and
+            preserves its RBAC without administrator fallback. This setting
+            applies only to sandboxed runs and does not certify installed grants.
         validated: Whether the task has been vetted as correct and is eligible to
             promote to the leaderboard. Defaults to ``False`` so an unvetted task
             never counts until explicitly marked.
@@ -166,6 +170,7 @@ class Task(BaseModel):
     # through to enforcement, so a typo would silently ignore the author's
     # opt-out and fail the task somewhere far from the cause.
     agent_pod_security: Literal["baseline", "privileged"] = "baseline"
+    agent_rbac: Literal["benchmark", "task"] = "benchmark"
     validated: bool = False
     requires_unsandboxed: bool = False
 
@@ -191,6 +196,7 @@ class Task(BaseModel):
                 "infrastructure": {},
                 "documentation": [],
                 "agent_pod_security": "baseline",
+                "agent_rbac": "benchmark",
                 "validated": False,
                 "requires_unsandboxed": False,
             },
@@ -231,6 +237,7 @@ class Task(BaseModel):
         infrastructure = raw.get("infrastructure", {})
         documentation = raw.get("documentation", [])
         agent_pod_security = raw.get("agent_pod_security", "baseline")
+        agent_rbac = raw.get("agent_rbac", "benchmark")
         validated = raw.get("validated", False)
         requires_unsandboxed = raw.get("requires_unsandboxed", False)
 
@@ -252,6 +259,7 @@ class Task(BaseModel):
                 "agent_pod_security": (
                     "baseline" if agent_pod_security is None else _text(str(agent_pod_security))
                 ),
+                "agent_rbac": "benchmark" if agent_rbac is None else agent_rbac,
                 "validated": False if validated is None else validated,
                 "requires_unsandboxed": (
                     False if requires_unsandboxed is None else requires_unsandboxed

@@ -224,6 +224,7 @@ def test_to_dict_roundtrip_fields():
         "infrastructure",
         "documentation",
         "agent_pod_security",
+        "agent_rbac",
         "validated",
         "requires_unsandboxed",
     }
@@ -298,3 +299,19 @@ def test_empty_agent_pod_security_coalesces_to_the_default():
     assert Task.from_dict({"name": "n", "agent_pod_security": None}).agent_pod_security == (
         "baseline"
     )
+
+
+@pytest.mark.parametrize(
+    "value,expected", [(None, "benchmark"), ("benchmark", "benchmark"), ("task", "task")]
+)
+def test_agent_rbac_round_trips_and_defaults(value: str | None, expected: str) -> None:
+    task = Task.from_dict({"name": "n", "agent_rbac": value})
+    assert task.agent_rbac == expected
+    assert task.to_dict()["agent_rbac"] == expected
+    assert Task.model_validate({"agent_rbac": value}).agent_rbac == expected
+
+
+@pytest.mark.parametrize("value", ["Task", "admin", "", True, 1])
+def test_agent_rbac_rejects_unknown_modes(value: object) -> None:
+    with pytest.raises(ValidationError):
+        Task.from_dict({"name": "n", "agent_rbac": value})

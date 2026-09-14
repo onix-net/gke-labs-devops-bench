@@ -25,6 +25,8 @@ Every field below maps to an attribute on `Task`. Fields marked `Required` must 
 | `retrieval_context` | No | A list of supporting passages for retrieval-based (RAG) scoring. |
 | `agent_pod_security` | No (defaults `baseline`) | Pod-security level enforced on the namespaces a sandboxed agent can reach — `baseline` or `privileged`, and nothing else (any other value fails validation at load time). `baseline` denies privileged containers, host namespaces, and `hostPath` volumes. Set `privileged` **only** if your task's own subject matter is privileged workloads — it removes the control that denies the observed privileged-pod escape, so expect to justify it in review. |
 
+| `agent_rbac` | No (defaults `benchmark`) | Sandbox permission ownership: `benchmark` provisions the default grants; `task` preserves task-provisioned RBAC for the existing `bench-system/bench-agent` ServiceAccount, requires baseline pod security and a pinned cluster, and never permits administrator fallback. |
+
 > [!NOTE]
 > An empty YAML block (`key:` with no value) is treated as the field's empty default rather than an error, so you can stub out an optional field without breaking validation.
 
@@ -218,3 +220,28 @@ unit tests and linters, never provisioning infra or running an eval. (For change
 
 To actually prove the task runs and grades correctly, use the `validate-eval` skill, which runs it in
 a self-healing loop and recommends setting `validated: true` once it's green.
+
+
+## Task-owned sandbox permissions
+
+Set `agent_rbac: task` when the fixture provisions the exact solver identity and
+its Roles/RoleBindings before sandbox setup. The benchmark verifies that
+`bench-system/bench-agent` exists, enforces baseline pod security, and mints the
+same short-lived ServiceAccount token without applying its default RBAC manifest.
+Task mode requires an explicit provider context pin and `agent_pod_security:
+baseline`; neither ambient-cluster nor administrator-fallback environment overrides
+weaken these requirements. Token or policy failures stop the run.
+
+For reused clusters, the preflight refuses the known `bench-agent-edit` and
+`bench-agent-cluster-supplement` ClusterRoleBindings if they still target the
+identity, directly or through its standard ServiceAccount/authenticated groups.
+It does not delete or rewrite those bindings. Resolve them through reviewed task
+provisioning before running. The host credential must be able to read the existing
+ServiceAccount and ClusterRoleBindings, enforce pod security, and mint its token.
+
+This is an ownership mode, not a complete effective-permissions audit. Other
+bindings, role aggregation, ServiceAccount credentials, admission policies and
+network paths remain the task author's responsibility. The field does not enable
+the Docker sandbox or override `requires_unsandboxed`; select sandbox execution
+and retain `requires_unsandboxed: false` when relying on this boundary. Existing
+tasks that omit the field retain benchmark-owned grants and existing opt-outs.

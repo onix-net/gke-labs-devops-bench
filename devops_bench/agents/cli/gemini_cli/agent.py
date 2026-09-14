@@ -257,6 +257,7 @@ class GeminiCliAgent(AgentHarness):
         env_overlay = _build_env(self.config)
         rules_text = caps.rules.text
 
+        timed_out = False
         with agent_workdir(workspace_path, prefix="gemini-run-") as workdir:
             if rules_text:
                 (workdir / _GEMINI_RULES_FILE).write_text(rules_text, encoding="utf-8")
@@ -286,21 +287,40 @@ class GeminiCliAgent(AgentHarness):
                     host_run=run,
                 )
             except SubprocessError as exc:
-                return AgentResult.errored(f"gemini subprocess error: {exc}")
+                # With check=False, run raises only on timeout. Keep its partial
+                # stream, as the Claude adapter does, instead of losing evidence.
+                stdout = exc.stdout or ""
+                stderr = (exc.stderr or "").strip()[-2000:]
+                returncode = exc.returncode
+                timed_out = True
+                reason = f"gemini timed out after {self.config.timeout_sec}s"
+                if stderr:
+                    reason += f": {stderr}"
             except OSError as exc:
                 # Missing / non-executable binary; core.subprocess.run does not wrap.
                 return AgentResult.errored(f"gemini binary unavailable: {exc}")
 
-        output, trajectory, tokens, parse_errors = parse_stream_json(completed.stdout or "")
+            else:
+                stdout = completed.stdout or ""
+                stderr = (completed.stderr or "").strip()[-2000:]
+                returncode = completed.returncode
+                reason = (
+                    None
+                    if returncode == 0
+                    else f"gemini exited {returncode}: {stderr or '<no stderr>'}"
+                )
+
+        output, trajectory, tokens, parse_errors = parse_stream_json(stdout)
         errors: list[str] = list(parse_errors)
-        if completed.returncode != 0:
-            stderr = (completed.stderr or "").strip()
-            errors.append(f"gemini exited {completed.returncode}: {stderr or '<no stderr>'}")
-            if not output:
-                output = f"Error: gemini exited {completed.returncode}"
         metadata: dict = {}
-        if completed.returncode != 0:
-            metadata["returncode"] = completed.returncode
+        if stderr:
+            metadata["stderr"] = stderr
+        if timed_out:
+            metadata["timed_out"] = True
+        if reason is not None:
+            errors.append(reason)
+            metadata["returncode"] = returncode
+            output = output or f"Error: {reason}"
         return AgentResult(
             output=output,
             trajectory=trajectory,

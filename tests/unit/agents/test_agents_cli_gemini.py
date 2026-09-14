@@ -300,7 +300,7 @@ def test_execute_handles_subprocess_error(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(gemini_mod, "run", fake_run)
     result = GeminiCliAgent(AgentConfig(target="gemini")).run("p")
     assert result.has_errors()
-    assert "subprocess error" in result.errors[0]
+    assert any("timed out" in error for error in result.errors)
     assert result.trajectory == []
 
 
@@ -793,3 +793,67 @@ def test_execute_forwards_extra_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     GeminiCliAgent(cfg).run("p")
     assert "--flag1" in captured["argv"]
     assert "--opt=val" in captured["argv"]
+
+
+def test_timeout_preserves_completed_and_pending_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    stream = (
+        _stream(
+            {
+                "type": "tool_use",
+                "tool_id": "read",
+                "tool_name": "run_shell_command",
+                "parameters": {"command": "kubectl get pods"},
+            },
+            {"type": "tool_result", "tool_id": "read", "status": "success", "output": "ready"},
+            {
+                "type": "tool_use",
+                "tool_id": "search",
+                "tool_name": "google_web_search",
+                "parameters": {"query": "documentation"},
+            },
+        )
+        + '{"type":'
+    )
+
+    def fake_run(argv: list[str], **kwargs: object) -> None:
+        raise SubprocessError(
+            argv, returncode=-1, stdout=stream, stderr="x" * 3000 + "fetch failed"
+        )
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    result = GeminiCliAgent(AgentConfig(target="gemini", timeout_sec=15)).run("p")
+    assert [entry["name"] for entry in result.trajectory] == [
+        "run_shell_command",
+        "google_web_search",
+    ]
+    assert result.trajectory[0]["status"] == "completed"
+    assert result.trajectory[1]["status"] == "called"
+    assert result.metadata["returncode"] == -1
+    assert result.metadata["timed_out"] is True
+    assert result.metadata["stderr"].endswith("fetch failed")
+    assert len(result.metadata["stderr"]) <= 2000
+    assert any("timed out" in error for error in result.errors)
+
+
+def test_real_subprocess_timeout_retains_emitted_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    from devops_bench.core.subprocess import run as actual_run
+
+    event = {
+        "type": "tool_use",
+        "tool_id": "pending",
+        "tool_name": "read_file",
+        "parameters": {"path": "fixture.txt"},
+    }
+    program = f"import time; print({json.dumps(event)!r}, flush=True); time.sleep(10)"
+
+    def child_run(argv: list[str], **kwargs: object) -> None:
+        actual_run([sys.executable, "-u", "-c", program], check=False, timeout=0.5)
+
+    monkeypatch.setattr(gemini_mod, "run", child_run)
+    result = GeminiCliAgent(AgentConfig(target="gemini", timeout_sec=0.5)).run("p")
+    assert result.has_errors()
+    assert result.metadata["timed_out"] is True
+    assert result.trajectory[0]["name"] == "read_file"
+    assert result.trajectory[0]["status"] == "called"

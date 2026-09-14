@@ -1094,3 +1094,18 @@ def test_json_path_wrong_type_for_inner_index_fails_without_crashing() -> None:
     with patch(_GET, return_value={"data": {"flags": '{"x":2}'}}):
         result = _verifier(op="ne", path="data.flags", json_path="$.x[0]", value=1).verify(0)
     assert result.success is False
+
+
+@pytest.mark.parametrize("container", ["object", "array"])
+def test_json_path_deep_comparison_fails_closed(container: str) -> None:
+    expected: Any = 1
+    for _ in range(600):
+        expected = {"x": expected} if container == "object" else [expected]
+    document = (
+        '{"x":' * 600 + "1" + "}" * 600 if container == "object" else "[" * 600 + "1" + "]" * 600
+    )
+    with patch(_GET, return_value={"data": {"flags": document}}):
+        result = _verifier(op="eq", path="data.flags", json_path="$", value=expected).verify(0)
+    assert result.success is False
+    assert result.status == "fail"
+    assert "comparison" in result.reason

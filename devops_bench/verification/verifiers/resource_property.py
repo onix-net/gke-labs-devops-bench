@@ -584,7 +584,10 @@ class ResourcePropertyVerifier(BaseVerifier):
         except (ValueError, TypeError, IndexError, KeyError, AttributeError, RecursionError) as exc:
             return "fail", f"invalid JSON document or JSON path evaluation: {exc}", raw
         if self.op in ("eq", "ne"):
-            equal = _json_equal(value, self.value)
+            try:
+                equal = _json_equal(value, self.value)
+            except RecursionError:
+                return "fail", "JSON comparison exceeds supported nesting depth", raw
             success = equal if self.op == "eq" else not equal
             reason = f"JSON path {self.json_path!r} {self.op} expected value is {success}"
         else:

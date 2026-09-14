@@ -20,3 +20,19 @@ existing classifier; historical empty-trajectory voids remain unchanged.
 Validation: 1,877 unit tests passed; Ruff formatting and lint passed; independent
 review found no actionable issues. The license check reports 52 existing files
 without headers; none is changed by this patch. Historical attempt remains VOID.
+
+## Native stream persistence
+
+Every run now persists the agent's raw native stream alongside the parsed
+trajectory, on both a successful completion and a timeout. `AgentResult`
+carries the full, untruncated `raw_stdout` and `raw_stderr` the agent process
+produced. The harness writes these under the run directory as
+`agent-stream.jsonl` and `agent-stderr.log`, each only when non-empty, and
+never re-parses or reformats them. This keeps the original stream-json events
+and their native timestamps available even when the parsed trajectory is
+partial or empty.
+
+The `timed_out` and `returncode` values that were previously confined to
+`AgentResult.metadata`, and so never reached `results.json`, now also appear
+as top-level fields on every results row. A clean run records `timed_out:
+false` and `returncode: null`.

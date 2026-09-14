@@ -60,7 +60,11 @@ from devops_bench.core import (
     get_logger,
 )
 from devops_bench.deployers.factory import get_deployer
-from devops_bench.evalharness.artifacts import collect_generated_files, snapshot_dir
+from devops_bench.evalharness.artifacts import (
+    collect_generated_files,
+    persist_agent_streams,
+    snapshot_dir,
+)
 from devops_bench.evalharness.base import Harness
 from devops_bench.evalharness.fixtures import check_prompt_fixtures
 from devops_bench.evalharness.hold import (
@@ -1424,6 +1428,14 @@ class DefaultEvalHarness(Harness):
             except Exception:  # noqa: BLE001 - artifact collection must not sink a completed run
                 _log.exception("artifact collection failed for %s; continuing", task.name)
 
+            # Best-effort, same as artifact collection above: a write failure
+            # (disk full, permissions) must not turn an already-completed
+            # agent run into a failed, unscored record.
+            try:
+                persist_agent_streams(agent_res.raw_stdout, agent_res.raw_stderr, run_dir=run_dir)
+            except Exception:  # noqa: BLE001 - stream persistence must not sink a completed run
+                _log.exception("agent stream persistence failed for %s; continuing", task.name)
+
             expected_output = self.replace_placeholders(
                 task.expected_output, active_cluster_name, target_dep, ns
             )
@@ -1740,6 +1752,8 @@ class DefaultEvalHarness(Harness):
                 "verification_parse_errors": list(verification_parse_errors or []),
                 "verification_report": list(verification_report or []),
                 "verification_status": verification_status,
+                "timed_out": dumped.get("metadata", {}).get("timed_out", False),
+                "returncode": dumped.get("metadata", {}).get("returncode"),
             }
         )
         return record
@@ -1865,6 +1879,13 @@ class DefaultEvalHarness(Harness):
             # Only tasks vetted as correct promote to the leaderboard; downstream
             # ingest gates inclusion on this flag (default False until vetted).
             "validated": task.validated,
+            # Structured agent-process outcome, read straight from
+            # ``AgentResult.metadata``: whether the run was killed for
+            # exceeding its timeout, and the subprocess exit code when one
+            # was captured. ``None``/``False`` here means the agent process
+            # never got far enough to report either.
+            "timed_out": False,
+            "returncode": None,
         }
 
     def _drain_scenario(

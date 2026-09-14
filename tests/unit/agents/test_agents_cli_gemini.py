@@ -50,34 +50,44 @@ def _stream(*events: dict) -> str:
 
 
 SAMPLE_STREAM = _stream(
-    {"type": "init", "session_id": "abc-123", "model": "gemini-2.5-pro"},
+    {
+        "type": "init",
+        "session_id": "abc-123",
+        "model": "gemini-2.5-pro",
+        "timestamp": "2026-09-14T16:43:14.684Z",
+    },
     {
         "type": "tool_use",
         "id": "call-1",
         "name": "mcp_gke_list_clusters",
         "input": {"project": "p1"},
+        "timestamp": "2026-09-14T16:43:15.001Z",
     },
     {
         "type": "tool_result",
         "tool_use_id": "call-1",
         "content": "cluster-a, cluster-b",
+        "timestamp": "2026-09-14T16:43:15.502Z",
     },
     {
         "type": "tool_use",
         "id": "call-2",
         "name": "mcp_gke_get_cluster",
         "input": {"cluster": "cluster-a"},
+        "timestamp": "2026-09-14T16:43:16.010Z",
     },
     {
         "type": "tool_result",
         "tool_use_id": "call-2",
         "content": "v1.30",
         "is_error": False,
+        "timestamp": "2026-09-14T16:43:16.512Z",
     },
     {
         "type": "result",
         "output": "Done.",
         "tokens": {"prompt_token_count": 10, "candidates_token_count": 20},
+        "timestamp": "2026-09-14T16:43:17.003Z",
     },
 )
 
@@ -261,12 +271,13 @@ def test_gemini_agent_registered_under_canonical_key() -> None:
 
 def test_execute_returns_typed_result_with_trajectory(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict = {}
+    stderr_fixture = "warning: gemini-x cache miss\n"
 
     def fake_run(argv, **kwargs):
         captured["argv"] = argv
         captured["timeout"] = kwargs.get("timeout")
         captured["extra_env"] = kwargs.get("extra_env")
-        return SimpleNamespace(stdout=SAMPLE_STREAM, stderr="", returncode=0)
+        return SimpleNamespace(stdout=SAMPLE_STREAM, stderr=stderr_fixture, returncode=0)
 
     monkeypatch.setattr(gemini_mod, "run", fake_run)
     agent = GeminiCliAgent(AgentConfig(target="gemini-x", timeout_sec=30.0))
@@ -280,6 +291,21 @@ def test_execute_returns_typed_result_with_trajectory(monkeypatch: pytest.Monkey
     assert "--output-format" in captured["argv"]
     assert "stream-json" in captured["argv"]
     assert captured["argv"][-2:] == ["-p", "ping"]
+    assert result.raw_stdout == SAMPLE_STREAM
+    assert result.raw_stderr == stderr_fixture
+
+
+def test_execute_raw_stdout_preserves_event_timestamps_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(argv, **kwargs):
+        return SimpleNamespace(stdout=SAMPLE_STREAM, stderr="", returncode=0)
+
+    monkeypatch.setattr(gemini_mod, "run", fake_run)
+    result = GeminiCliAgent(AgentConfig(target="gemini")).run("p")
+    for event in SAMPLE_STREAM.strip().splitlines():
+        timestamp = json.loads(event)["timestamp"]
+        assert timestamp in result.raw_stdout
 
 
 def test_execute_records_non_zero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -815,10 +841,10 @@ def test_timeout_preserves_completed_and_pending_tools(monkeypatch: pytest.Monke
         + '{"type":'
     )
 
+    stderr = "x" * 3000 + "fetch failed"
+
     def fake_run(argv: list[str], **kwargs: object) -> None:
-        raise SubprocessError(
-            argv, returncode=-1, stdout=stream, stderr="x" * 3000 + "fetch failed"
-        )
+        raise SubprocessError(argv, returncode=-1, stdout=stream, stderr=stderr)
 
     monkeypatch.setattr(gemini_mod, "run", fake_run)
     result = GeminiCliAgent(AgentConfig(target="gemini", timeout_sec=15)).run("p")
@@ -833,6 +859,9 @@ def test_timeout_preserves_completed_and_pending_tools(monkeypatch: pytest.Monke
     assert result.metadata["stderr"].endswith("fetch failed")
     assert len(result.metadata["stderr"]) <= 2000
     assert any("timed out" in error for error in result.errors)
+    assert result.raw_stdout == stream
+    assert result.raw_stderr == stderr
+    assert len(result.raw_stderr) > 2000
 
 
 def test_real_subprocess_timeout_retains_emitted_tool(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -958,3 +958,184 @@ def test_a_message_merely_containing_not_found_is_not_treated_as_notfound() -> N
     with patch(_GET, side_effect=exc):
         result = _verifier(op="exists", resource_name="hello-app").verify(0.0)
     assert result.status == "error"
+
+
+@pytest.mark.parametrize(
+    ("document", "expected", "op", "success"),
+    [
+        (
+            '{ "b": [1.0, {"x": true}], "a": "1Gi" }',
+            {"a": "1Gi", "b": [1, {"x": True}]},
+            "eq",
+            True,
+        ),
+        ('{"x": false}', {"x": 0}, "eq", False),
+        ('{"x": true}', {"x": 1}, "ne", True),
+        ('{"x": "1"}', {"x": 1}, "eq", False),
+        ('{"x": "1Gi"}', {"x": "1024Mi"}, "eq", False),
+        ('{"x": [1, 2]}', {"x": [2, 1]}, "eq", False),
+        ('{"x": 2}', {"x": 1}, "eq", False),
+        ('{"x": 2}', {"x": 1}, "ne", True),
+    ],
+)
+def test_json_path_compares_structural_json(
+    document: str, expected: Any, op: str, success: bool
+) -> None:
+    with patch(_GET, return_value={"data": {"flags": document}}):
+        result = _verifier(op=op, path="data.flags", json_path="$", value=expected).verify(0)
+    assert result.success is success
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        "{",
+        '{"x":1,"x":2}',
+        '{"nested":{"x":1,"x":2}}',
+        "NaN",
+        "Infinity",
+        "-Infinity",
+        {"x": 1},
+    ],
+)
+@pytest.mark.parametrize("op", ["eq", "ne", "exists"])
+def test_json_path_invalid_document_fails_closed(document: Any, op: str) -> None:
+    with patch(_GET, return_value={"data": {"flags": document}}):
+        result = _verifier(op=op, path="data.flags", json_path="$", value=2).verify(0)
+    assert result.success is False
+    assert "JSON" in result.reason
+
+
+@pytest.mark.parametrize("document", ["{}", '{"flags":{}}', '{"flags":{"a":1,"b":2}}'])
+def test_json_path_requires_exactly_one_inner_match(document: str) -> None:
+    with patch(_GET, return_value={"data": {"flags": document}}):
+        result = _verifier(op="ne", path="data.flags", json_path="$.flags.*", value=3).verify(0)
+    assert result.success is False
+
+
+@pytest.mark.parametrize("payload", [{}, {"data": {"a": "{}", "b": "{}"}}])
+def test_json_path_requires_exactly_one_outer_match(payload: dict[str, Any]) -> None:
+    with patch(_GET, return_value=payload):
+        result = _verifier(op="exists", path="data.*", json_path="$").verify(0)
+    assert result.success is False
+
+
+@pytest.mark.parametrize(
+    ("op", "value", "success"),
+    [
+        ("exists", None, True),
+        ("gt", 1, True),
+        ("eq", 2.0, True),
+        ("ne", True, True),
+        ("lt", 1, False),
+    ],
+)
+def test_json_path_selects_decoded_value(op: str, value: Any, success: bool) -> None:
+    with patch(_GET, return_value={"data": {"flags": '{"flags":{"payment":2}}'}}):
+        result = _verifier(
+            op=op, path="data.flags", json_path="$.flags.payment", value=value
+        ).verify(0)
+    assert result.success is success
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"json_path": "["},
+        {"json_path": ""},
+        {"json_path": "$", "path": None},
+        {"json_path": "$", "across_matches": "none"},
+        {"json_path": "$", "across_matches": "every"},
+        {"json_path": "$", "op": "absent"},
+    ],
+)
+def test_json_path_rejects_ambiguous_shapes(options: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        _verifier(**({"op": "exists", "path": "data.flags"} | options))
+
+
+@pytest.mark.parametrize(("op", "expected"), [("matches", "^ENABLED$"), ("contains", "ABLE")])
+def test_json_path_preserves_string_operators(op: str, expected: str) -> None:
+    with patch(_GET, return_value={"data": {"flags": '{"state":"ENABLED"}'}}):
+        result = _verifier(op=op, path="data.flags", json_path="$.state", value=expected).verify(0)
+    assert result.success is True
+
+
+def test_json_path_whole_flag_contract_through_spec_parser() -> None:
+    check = parse_node(
+        {
+            "type": "resource_property",
+            "kind": "configmap",
+            "name": "preserve-ad-flag",
+            "resource_name": "flagd",
+            "namespace": "shop",
+            "path": 'data["flags.json"]',
+            "json_path": "$.flags.adFailure",
+            "op": "eq",
+            "value": {"state": "ENABLED", "variants": {"off": 0, "on": 1}, "defaultVariant": "off"},
+        }
+    )
+    with patch(
+        _GET,
+        return_value={
+            "data": {
+                "flags.json": """{
+        "flags": {"adFailure": {"variants":{"on":1.0,"off":0},
+        "defaultVariant":"off","state":"ENABLED"}, "paymentFailure": {}}
+    }"""
+            }
+        },
+    ):
+        assert check.verify(0).success is True
+
+
+def test_json_path_wrong_type_for_inner_index_fails_without_crashing() -> None:
+    with patch(_GET, return_value={"data": {"flags": '{"x":2}'}}):
+        result = _verifier(op="ne", path="data.flags", json_path="$.x[0]", value=1).verify(0)
+    assert result.success is False
+
+
+@pytest.mark.parametrize("container", ["object", "array"])
+def test_json_path_deep_comparison_fails_closed(container: str) -> None:
+    expected: Any = 1
+    for _ in range(600):
+        expected = {"x": expected} if container == "object" else [expected]
+    document = (
+        '{"x":' * 600 + "1" + "}" * 600 if container == "object" else "[" * 600 + "1" + "]" * 600
+    )
+    with patch(_GET, return_value={"data": {"flags": document}}):
+        result = _verifier(op="eq", path="data.flags", json_path="$", value=expected).verify(0)
+    assert result.success is False
+    assert result.status == "fail"
+    assert "comparison" in result.reason
+
+
+@pytest.mark.parametrize(
+    ("document", "expected", "op", "success"),
+    [
+        ("1.0000000000000001", 1, "eq", False),
+        ("1e-999", 0, "eq", False),
+        ("9007199254740993.0", 9007199254740992, "eq", False),
+        ("9007199254740993.0", 9007199254740993, "eq", True),
+        ("0.1", 0.1, "eq", True),
+        ("1.0", 1, "eq", True),
+        ("1.0000000000000001", 1, "ne", True),
+        ("1.0000000000000001", 1, "gt", True),
+        ("1e-999", 0, "gt", True),
+        ("1e999", 1, "gt", True),
+        ("0.1", 0.2, "lt", True),
+        ("1.0", True, "eq", False),
+        ("1.0", True, "gt", False),
+        ("1.0", "100m", "gt", True),
+        ('{"x":[0.1, true]}', {"x": [0.1, 1]}, "eq", False),
+    ],
+)
+def test_json_path_preserves_number_precision(
+    document: str, expected: Any, op: str, success: bool
+) -> None:
+    import json
+
+    with patch(_GET, return_value={"data": {"flags": document}}):
+        result = _verifier(op=op, path="data.flags", json_path="$", value=expected).verify(0)
+    assert result.success is success
+    json.dumps(result.raw)  # Decoded Decimal values must not leak into persisted raw data.

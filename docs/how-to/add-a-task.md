@@ -143,6 +143,37 @@ verification_spec:
       op: absent
 ```
 
+For a resource field containing JSON text (such as a ConfigMap entry), use
+`resource_property.json_path` to compare decoded structure:
+
+```yaml
+check:
+  type: resource_property
+  kind: configmap
+  resource_name: feature-flags
+  namespace: shop
+  path: 'data["flags.json"]'
+  json_path: '$.flags.adFailure'
+  op: eq
+  value:
+    state: ENABLED
+    variants: {"off": 0, "on": 1}
+    defaultVariant: "off"
+```
+
+With `json_path`, `path` must resolve to exactly one string across all matched
+resources, and `json_path` must resolve to exactly one decoded value. Malformed
+JSON, duplicate keys (including nested objects), nonfinite numbers, missing
+matches, and multiple matches fail, including for `ne`. `across_matches` and
+`op: absent` are rejected with `json_path`; use `exists` to require a decoded
+field. JSON `eq`/`ne` compare full nested structure: object order and whitespace
+do not matter, array order does, numbers compare exactly using decimal values
+(expected YAML floats use their decimal text), and booleans and
+strings remain distinct from numbers. JSON strings do not receive Kubernetes
+quantity coercion for equality. Other operators retain their existing behavior
+on the decoded value. Checks without `json_path` are unchanged. This contract
+compares configuration; it does not establish that an application consumed it.
+
 Each entry carries the scoring vocabulary, not just a check tree:
 
 | Key | Required | Meaning |

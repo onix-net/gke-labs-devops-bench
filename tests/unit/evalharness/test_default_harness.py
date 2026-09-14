@@ -399,6 +399,78 @@ def test_run_one_collects_files_the_agent_writes_to_its_workspace(
         AGENTS._items.pop("fake-workspace-writer", None)  # noqa: SLF001
 
 
+class _StreamingAgent(AgentHarness):
+    """Stand-in agent that reports a raw native stream and a timeout outcome."""
+
+    def _execute(self, prompt: str, workspace_path: Path | None = None) -> AgentResult:
+        return AgentResult(
+            output="partial",
+            trajectory=[],
+            errors=["gemini timed out after 30s"],
+            metadata={"timed_out": True, "returncode": -1},
+            raw_stdout='{"type": "init", "timestamp": "2026-09-14T16:43:14.684Z"}\n',
+            raw_stderr="fetch failed\n",
+        )
+
+
+def test_run_one_persists_the_agent_native_stream_and_records_metadata(
+    isolated_env: None, tmp_path: Path
+) -> None:
+    """Every run keeps the raw native stream and surfaces timeout/returncode.
+
+    The parsed trajectory has always been the record's source of truth, but the
+    raw stream the agent actually emitted (with its native timestamps) used to
+    be dropped once parsed. It now lands on disk next to the run's other
+    artifacts, and the structured timeout/returncode outcome that used to be
+    buried in ``AgentResult.metadata`` (which never reaches ``results.json``)
+    is now a top-level record field.
+    """
+    AGENTS.register("fake-streaming-agent")(_StreamingAgent)
+    try:
+        harness = DefaultEvalHarness(
+            project_id="p", cluster_name="c", agent_type="fake-streaming-agent", no_infra=True
+        )
+        task = Task.from_dict({"task_id": "t", "name": "demo", "prompt": "p"})
+        run_dir = tmp_path / "run_1"
+        run_dir.mkdir()
+
+        record = harness._run_one(task, run_dir)  # noqa: SLF001
+
+        stream_path = run_dir / "agent-stream.jsonl"
+        stderr_path = run_dir / "agent-stderr.log"
+        assert (
+            stream_path.read_text() == '{"type": "init", "timestamp": "2026-09-14T16:43:14.684Z"}\n'
+        )
+        assert stderr_path.read_text() == "fetch failed\n"
+        assert record["timed_out"] is True
+        assert record["returncode"] == -1
+    finally:
+        AGENTS._items.pop("fake-streaming-agent", None)  # noqa: SLF001
+
+
+def test_run_one_seeds_timed_out_and_returncode_defaults_on_a_clean_run(
+    isolated_env: None, tmp_path: Path
+) -> None:
+    """A run with no timeout/returncode metadata gets the symmetric defaults."""
+    AGENTS.register("fake-workspace-writer")(_WorkspaceWritingAgent)
+    try:
+        harness = DefaultEvalHarness(
+            project_id="p", cluster_name="c", agent_type="fake-workspace-writer", no_infra=True
+        )
+        task = Task.from_dict({"task_id": "t", "name": "demo", "prompt": "p"})
+        run_dir = tmp_path / "run_1"
+        run_dir.mkdir()
+
+        record = harness._run_one(task, run_dir)  # noqa: SLF001
+
+        assert record["timed_out"] is False
+        assert record["returncode"] is None
+        assert not (run_dir / "agent-stream.jsonl").exists()
+        assert not (run_dir / "agent-stderr.log").exists()
+    finally:
+        AGENTS._items.pop("fake-workspace-writer", None)  # noqa: SLF001
+
+
 def test_run_one_warns_when_a_verification_entry_fails_to_parse(
     isolated_env: None, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -809,6 +881,8 @@ _RESULTS_JSON_REQUIRED_KEYS: frozenset[str] = frozenset(
         "verification_status",
         "generation_only",
         "validated",
+        "timed_out",
+        "returncode",
     }
 )
 

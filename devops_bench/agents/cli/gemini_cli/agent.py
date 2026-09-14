@@ -290,7 +290,8 @@ class GeminiCliAgent(AgentHarness):
                 # With check=False, run raises only on timeout. Keep its partial
                 # stream, as the Claude adapter does, instead of losing evidence.
                 stdout = exc.stdout or ""
-                stderr = (exc.stderr or "").strip()[-2000:]
+                raw_stderr = exc.stderr or ""
+                stderr = raw_stderr.strip()[-2000:]
                 returncode = exc.returncode
                 timed_out = True
                 reason = f"gemini timed out after {self.config.timeout_sec}s"
@@ -302,7 +303,8 @@ class GeminiCliAgent(AgentHarness):
 
             else:
                 stdout = completed.stdout or ""
-                stderr = (completed.stderr or "").strip()[-2000:]
+                raw_stderr = completed.stderr or ""
+                stderr = raw_stderr.strip()[-2000:]
                 returncode = completed.returncode
                 reason = (
                     None
@@ -327,4 +329,6 @@ class GeminiCliAgent(AgentHarness):
             tokens=tokens,
             errors=errors,
             metadata=metadata,
+            raw_stdout=stdout,
+            raw_stderr=raw_stderr,
         )

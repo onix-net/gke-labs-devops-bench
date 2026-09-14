@@ -39,6 +39,8 @@ def test_agent_result_defaults_to_empty_collections() -> None:
     assert result.errors == []
     assert result.metadata == {}
     assert result.latency == 0.0
+    assert result.raw_stdout == ""
+    assert result.raw_stderr == ""
     assert not result.has_errors()
 
 
@@ -51,6 +53,8 @@ def test_agent_result_to_dict_is_serializable_copies() -> None:
         latency=2.5,
         errors=["x"],
         metadata={"k": 1},
+        raw_stdout="stdout blob",
+        raw_stderr="stderr blob",
     )
     out = result.to_dict()
     assert out == {
@@ -60,6 +64,8 @@ def test_agent_result_to_dict_is_serializable_copies() -> None:
         "latency": 2.5,
         "errors": ["x"],
         "metadata": {"k": 1},
+        "raw_stdout": "stdout blob",
+        "raw_stderr": "stderr blob",
     }
     # to_dict must hand the harness fresh containers so mutating the snapshot
     # never bleeds back into the result it came from.

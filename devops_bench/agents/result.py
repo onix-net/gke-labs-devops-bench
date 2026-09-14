@@ -78,6 +78,10 @@ class AgentResult:
             failure, parse miss, timeout) is reached — never silently dropped.
         metadata: Agent-specific extras (e.g. raw provider stats, session ids)
             that do not fit the typed fields above.
+        raw_stdout: Full, untruncated stdout captured from the agent process,
+            when the agent implementation populates it. Empty when unused.
+        raw_stderr: Full, untruncated stderr captured from the agent process,
+            when the agent implementation populates it. Empty when unused.
     """
 
     output: str
@@ -86,6 +90,8 @@ class AgentResult:
     latency: float = 0.0
     errors: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    raw_stdout: str = ""
+    raw_stderr: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-serializable mapping consumed by the harness.
@@ -106,6 +112,8 @@ class AgentResult:
             "latency": self.latency,
             "errors": list(self.errors),
             "metadata": dict(self.metadata),
+            "raw_stdout": self.raw_stdout,
+            "raw_stderr": self.raw_stderr,
         }
 
     def has_errors(self) -> bool:

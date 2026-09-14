@@ -22,7 +22,7 @@ from pathlib import Path
 
 from devops_bench.core import get_logger
 
-__all__ = ["snapshot_dir", "collect_generated_files"]
+__all__ = ["snapshot_dir", "collect_generated_files", "persist_agent_streams"]
 
 _log = get_logger("evalharness.artifacts")
 
@@ -98,3 +98,37 @@ def collect_generated_files(
 
     _log.info("collected %d generated artifact(s) into %s", len(copied), gen_files_dir)
     return copied
+
+
+def persist_agent_streams(
+    raw_stdout: str,
+    raw_stderr: str,
+    run_dir: str | os.PathLike[str],
+) -> list[str]:
+    """Write an agent's raw stdout/stderr streams into the run directory verbatim.
+
+    ``raw_stdout`` lands at ``<run_dir>/agent-stream.jsonl`` and ``raw_stderr``
+    at ``<run_dir>/agent-stderr.log``. Each is written only when non-empty, and
+    neither is parsed or reformatted: this is the untruncated native stream a
+    run produced, kept alongside the parsed trajectory the harness already
+    records.
+
+    Args:
+        raw_stdout: The agent's full stdout, or empty when unavailable.
+        raw_stderr: The agent's full stderr, or empty when unavailable.
+        run_dir: The run output directory the files are written under.
+
+    Returns:
+        The file names that were written.
+    """
+    written: list[str] = []
+    run_path = Path(run_dir)
+    if raw_stdout:
+        stream_path = run_path / "agent-stream.jsonl"
+        stream_path.write_text(raw_stdout, encoding="utf-8")
+        written.append(stream_path.name)
+    if raw_stderr:
+        stderr_path = run_path / "agent-stderr.log"
+        stderr_path.write_text(raw_stderr, encoding="utf-8")
+        written.append(stderr_path.name)
+    return written

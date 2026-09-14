@@ -35,6 +35,8 @@ anything but numbers.
 
 from __future__ import annotations
 
+import json
+import math
 import re
 from functools import lru_cache
 from typing import Any, Literal
@@ -152,6 +154,43 @@ def _is_quantity_string(value: Any) -> bool:
             return False
 
     return False
+
+
+def _json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Decode an object without silently accepting duplicate keys."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        result[key] = value
+    return result
+
+
+def _json_float(text: str) -> float:
+    """Reject nonfinite constants and overflowing JSON numbers."""
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError("nonfinite JSON number")
+    return value
+
+
+def _json_equal(left: Any, right: Any) -> bool:
+    """Compare JSON structure without Python's bool/number equivalence."""
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+    if isinstance(left, int | float) and isinstance(right, int | float):
+        return left == right
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(
+            _json_equal(value, right[key]) for key, value in left.items()
+        )
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _json_equal(a, b) for a, b in zip(left, right, strict=True)
+        )
+    return left == right
 
 
 def _apply_op(op: str, actual: Any, expected: Any) -> tuple[bool, str]:
@@ -312,6 +351,7 @@ class ResourcePropertyVerifier(BaseVerifier):
     selector: str | None = None
     namespace: str | None = None
     path: str | None = None
+    json_path: str | None = None
     op: Literal["eq", "ne", "gt", "gte", "lt", "lte", "exists", "absent", "contains", "matches"]
     value: Any = None
     # Quantifies over the elements of path's LAST wildcard-like segment
@@ -338,6 +378,17 @@ class ResourcePropertyVerifier(BaseVerifier):
             except _JsonPathError as exc:
                 msg = f"path {self.path!r} is not a valid JSONPath: {exc}"
                 raise ValueError(msg) from exc
+        if self.json_path is not None:
+            if not self.path or not self.json_path:
+                raise ValueError("json_path requires nonempty 'path' and 'json_path'")
+            if self.across_matches is not None or self.op == "absent":
+                raise ValueError("json_path does not take 'across_matches' or op 'absent'")
+            try:
+                _compile(self.json_path)
+            except _JsonPathError as exc:
+                raise ValueError(
+                    f"json_path {self.json_path!r} is not a valid JSONPath: {exc}"
+                ) from exc
         if self.op == "absent" and self.across_matches:
             msg = "op 'absent' already asserts emptiness and does not take 'across_matches'"
             raise ValueError(msg)
@@ -409,6 +460,9 @@ class ResourcePropertyVerifier(BaseVerifier):
 
         assert self.path is not None  # guaranteed by _check_shape at this point
         compiled = _compile(self.path)
+
+        if self.json_path is not None:
+            return self._check_json(compiled, objects, raw)
 
         # `absent` never carries across_matches (rejected in _check_shape), so
         # this only ever fires for a genuine element-wise reduction; `absent`
@@ -504,6 +558,37 @@ class ResourcePropertyVerifier(BaseVerifier):
         reason = (
             f"across_matches={self.across_matches}: {detail}" if self.across_matches else detail
         )
+        return ("pass" if success else "fail"), reason, raw
+
+    def _check_json(
+        self, compiled: _JsonPath, objects: list[Any], raw: dict[str, Any]
+    ) -> tuple[VerificationStatus, str, dict[str, Any]]:
+        """Resolve one encoded string and one decoded value; invalid input always fails."""
+        assert self.json_path is not None
+        try:
+            outer = [match.value for obj in objects for match in compiled.find(obj)]
+            raw["path_matches"] = len(outer)
+            if len(outer) != 1 or not isinstance(outer[0], str):
+                return "fail", "JSON decoding requires exactly one string from path", raw
+            decoded = json.loads(
+                outer[0],
+                object_pairs_hook=_json_object,
+                parse_float=_json_float,
+                parse_constant=_json_float,
+            )
+            inner = _compile(self.json_path).find(decoded)
+            raw["json_path_matches"] = len(inner)
+            if len(inner) != 1:
+                return "fail", f"JSON path {self.json_path!r} requires exactly one match", raw
+            value = inner[0].value
+        except (ValueError, TypeError, IndexError, KeyError, AttributeError, RecursionError) as exc:
+            return "fail", f"invalid JSON document or JSON path evaluation: {exc}", raw
+        if self.op in ("eq", "ne"):
+            equal = _json_equal(value, self.value)
+            success = equal if self.op == "eq" else not equal
+            reason = f"JSON path {self.json_path!r} {self.op} expected value is {success}"
+        else:
+            success, reason = self._apply_check(value)
         return ("pass" if success else "fail"), reason, raw
 
     def _apply_check(self, value: Any) -> tuple[bool, str]:

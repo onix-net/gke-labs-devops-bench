@@ -26,7 +26,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from devops_bench.agents import AGENTS, AgentConfig, AgentResult
 from devops_bench.agents import sandbox as agent_sandbox
@@ -1298,6 +1298,7 @@ class DefaultEvalHarness(Harness):
                     replace(cluster_info, name=active_cluster_name),
                     deployer.provider,
                     task.agent_pod_security,
+                    task.agent_rbac,
                 )
                 self._active_sandbox_spec = completed_spec
                 self._inventory_sandbox_home(
@@ -1568,6 +1569,7 @@ class DefaultEvalHarness(Harness):
         cluster_info: ClusterInfo,
         provider: Provider | None,
         pod_security: str,
+        agent_rbac: Literal["benchmark", "task"] = "benchmark",
     ) -> agent_sandbox.SandboxSpec:
         """Complete the skeletal sandbox spec for one provisioned task.
 
@@ -1594,6 +1596,7 @@ class DefaultEvalHarness(Harness):
                 to the deployer's own; also the fixture-discovery token.
             provider: The deployer's provider, or ``None`` when it has none.
             pod_security: The task's declared ``agent_pod_security`` level.
+            agent_rbac: Whether benchmark or task provisioning owns solver grants.
 
         Returns:
             The completed :class:`~devops_bench.agents.sandbox.SandboxSpec`.
@@ -1611,6 +1614,7 @@ class DefaultEvalHarness(Harness):
             creds_dir,
             token_ttl_sec=agent_credentials.token_ttl_for(self._agent_config.timeout_sec),
             pod_security=pod_security,
+            agent_rbac=agent_rbac,
         )
         return replace(
             self._agent_config.sandbox,

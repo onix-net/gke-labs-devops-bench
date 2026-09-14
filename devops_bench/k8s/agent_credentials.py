@@ -47,6 +47,7 @@ credential path.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, Literal
 
 from devops_bench.core import NetworkPlan, SandboxError, SubprocessError, get_bool, get_logger
 from devops_bench.k8s import kubectl
@@ -920,12 +921,72 @@ def render_agent_kubeconfig(plan: NetworkPlan, dest_dir: Path, *, user_fields: s
     return path
 
 
+def _require_task_identity(context: str) -> None:
+    """Check task provisioning without creating identity or changing grants.
+
+    Refuse the benchmark's known legacy broad bindings when they still target
+    this identity. This is not a general RBAC audit: the task owns assessment of
+    all other installed roles, bindings, admission and network controls.
+    """
+    try:
+        identity = kubectl.get_resource(
+            "serviceaccounts",
+            AGENT_SA_NAME,
+            namespace=AGENT_NAMESPACE,
+            context=context,
+            timeout=60,
+        )
+        metadata = identity.get("metadata", {})
+        if (
+            metadata.get("name") != AGENT_SA_NAME
+            or metadata.get("namespace") != AGENT_NAMESPACE
+            or not metadata.get("uid")
+            or metadata.get("deletionTimestamp")
+        ):
+            raise SandboxError("task-owned RBAC requires an existing, live solver ServiceAccount")
+        listing = kubectl.get_resource("clusterrolebindings", context=context, timeout=60)
+    except SubprocessError as exc:
+        raise SandboxError(
+            f"cannot verify the task-owned solver identity and legacy bindings ({exc}); "
+            "the task must provision its identity before sandbox setup"
+        ) from exc
+    bindings = listing.get("items")
+    if not isinstance(bindings, list):
+        raise SandboxError("cannot verify legacy bindings: malformed ClusterRoleBinding list")
+    legacy_names = {f"{AGENT_SA_NAME}-edit", f"{AGENT_SA_NAME}-cluster-supplement"}
+    for binding in bindings:
+        name = binding.get("metadata", {}).get("name")
+        if name not in legacy_names:
+            continue
+        if any(_subject_includes_agent(subject) for subject in binding.get("subjects", [])):
+            raise SandboxError(
+                f"task-owned RBAC refuses legacy broad ClusterRoleBinding {name!r} "
+                "targeting the solver identity; remove it through reviewed task provisioning "
+                "before this run. No bindings were changed."
+            )
+
+
+def _subject_includes_agent(subject: dict[str, Any]) -> bool:
+    """Match direct and standard group subjects covering this ServiceAccount."""
+    kind, name = subject.get("kind"), subject.get("name")
+    if kind == "ServiceAccount":
+        return name == AGENT_SA_NAME and subject.get("namespace") == AGENT_NAMESPACE
+    if kind == "User":
+        return name == _AGENT_USERNAME
+    return kind == "Group" and name in {
+        "system:authenticated",
+        "system:serviceaccounts",
+        f"system:serviceaccounts:{AGENT_NAMESPACE}",
+    }
+
+
 def provision_agent_credentials(
     plan: NetworkPlan,
     dest_dir: Path,
     *,
     token_ttl_sec: int,
     pod_security: str = POD_SECURITY_BASELINE,
+    agent_rbac: Literal["benchmark", "task"] = "benchmark",
 ) -> Path:
     """Seed the agent's identity and pod security, and render its kubeconfig.
 
@@ -933,8 +994,9 @@ def provision_agent_credentials(
     scoped credential this raises rather than falling back: a run that quietly
     reverted to the operator's admin certificate would look identical in the
     results while having no RBAC boundary at all. The fallback exists only
-    behind :data:`ALLOW_ADMIN_ENV`, for developing against a cluster where the
-    operator cannot create cluster roles.
+    behind :data:`ALLOW_ADMIN_ENV` in benchmark mode, for developing against a
+    cluster where the operator cannot create cluster roles. Task mode never
+    permits that fallback.
 
     Args:
         plan: The run's network plan, supplying the context pin and any server
@@ -945,6 +1007,10 @@ def provision_agent_credentials(
         pod_security: The task's declared ``agent_pod_security`` level.
             ``"privileged"`` skips :func:`enforce_pod_security` entirely, for
             a task whose own subject matter is privileged workloads.
+        agent_rbac: ``"benchmark"`` creates the default identity and grants.
+            ``"task"`` verifies the pre-existing identity without RBAC mutation,
+            requires baseline pod security and an explicit context pin, and
+            never permits administrator fallback. The task owns the full grant audit.
 
     Returns:
         Path of the written kubeconfig (mode 0600).
@@ -955,11 +1021,19 @@ def provision_agent_credentials(
             enforced; or when no scoped credential can be minted — unless the
             admin fallback is explicitly enabled.
     """
+    if agent_rbac not in {"benchmark", "task"}:
+        raise SandboxError(f"unknown agent_rbac mode {agent_rbac!r}")
+    if agent_rbac == "task":
+        if not plan.kubectl_context:
+            raise SandboxError("task-owned RBAC requires an explicit kubectl context pin")
+        if pod_security != POD_SECURITY_BASELINE:
+            raise SandboxError("task-owned RBAC requires baseline pod-security enforcement")
+        _require_task_identity(plan.kubectl_context)
     _refuse_unpinned_cluster(plan)
     # One switch covers both failures below, because they have one cause: an
     # operator whose credential cannot create cluster roles cannot create an
     # admission policy either.
-    allow_admin = get_bool(ALLOW_ADMIN_ENV, False)
+    allow_admin = agent_rbac == "benchmark" and get_bool(ALLOW_ADMIN_ENV, False)
 
     if pod_security == POD_SECURITY_PRIVILEGED:
         _log.warning(
@@ -975,6 +1049,11 @@ def provision_agent_credentials(
             # before it: this is the first cluster-scoped write the module
             # makes, so letting it escape uncaught would make the escape hatch
             # unreachable for the very operator it exists for.
+            if agent_rbac == "task":
+                raise SandboxError(
+                    f"could not enforce pod security for task-owned RBAC ({exc}); "
+                    "administrator fallback is forbidden in task mode"
+                ) from exc
             if not allow_admin:
                 raise SandboxError(
                     f"could not enforce pod security for the sandboxed agent ({exc}); "
@@ -989,9 +1068,15 @@ def provision_agent_credentials(
             )
 
     try:
-        ensure_agent_identity(dest_dir, plan.kubectl_context)
+        if agent_rbac == "benchmark":
+            ensure_agent_identity(dest_dir, plan.kubectl_context)
         token = mint_agent_token(token_ttl_sec, plan.kubectl_context)
     except SubprocessError as exc:
+        if agent_rbac == "task":
+            raise SandboxError(
+                f"could not mint the task-owned solver token ({exc}); "
+                "administrator fallback is forbidden in task mode"
+            ) from exc
         if not allow_admin:
             raise SandboxError(
                 "could not mint a scoped ServiceAccount credential for the sandboxed "

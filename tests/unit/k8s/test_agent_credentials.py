@@ -61,6 +61,8 @@ def _patch_kubectl(
     namespaces: dict | None = None,
     pods: dict | None = None,
     policy_api: bool = True,
+    service_account: dict | None = None,
+    bindings: list[dict] | None = None,
     calls: list[list[str]] | None = None,
 ) -> list[list[str]]:
     """Answer every kubectl call this module makes, recording the argv.
@@ -98,6 +100,23 @@ def _patch_kubectl(
             # Read off the verb rather than a fixed index: the context flags go
             # in ahead of the resource on a pinned call, and ``-A`` after it.
             resource = argv[argv.index("get") + 1]
+            if resource == "serviceaccounts":
+                identity = (
+                    service_account
+                    if service_account is not None
+                    else {
+                        "metadata": {
+                            "name": creds.AGENT_SA_NAME,
+                            "namespace": creds.AGENT_NAMESPACE,
+                            "uid": "task-sa",
+                        }
+                    }
+                )
+                return SimpleNamespace(returncode=0, stdout=json.dumps(identity), stderr="")
+            if resource == "clusterrolebindings":
+                return SimpleNamespace(
+                    returncode=0, stdout=json.dumps({"items": bindings or []}), stderr=""
+                )
             if resource == "namespaces":
                 return SimpleNamespace(returncode=0, stdout=json.dumps(namespaces), stderr="")
             if resource == "pods":
@@ -994,3 +1013,144 @@ def test_the_admin_escape_hatch_also_covers_the_pod_security_apply(
 
     # The scoped token still gets minted; only the pod-security half was lost.
     assert yaml.safe_load(path.read_text())["users"][0]["user"] == {"token": _TOKEN}
+
+
+def test_task_rbac_reuses_identity_without_broad_rbac_mutations(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = _patch_kubectl(monkeypatch)
+    path = creds.provision_agent_credentials(
+        _PINNED, tmp_path, token_ttl_sec=1500, agent_rbac="task"
+    )
+    assert yaml.safe_load(path.read_text())["users"][0]["user"] == {"token": _TOKEN}
+    assert not any(_applies(call, "bench-agent-rbac.yaml") for call in calls)
+    assert not (tmp_path / "bench-agent-rbac.yaml").exists()
+    assert any(_applies(call, "bench-agent-pod-security.yaml") for call in calls)
+    assert any("serviceaccounts" in call for call in calls)
+    assert any("clusterrolebindings" in call for call in calls)
+    assert not any("delete" in call for call in calls)
+    assert all(call[-2:] == ["--context", "kind-c1"] for call in calls)
+    token_call = next(call for call in calls if "token" in call)
+    assert "--duration=1500s" in token_call
+
+
+@pytest.mark.parametrize("name", ["bench-agent-edit", "bench-agent-cluster-supplement"])
+@pytest.mark.parametrize(
+    "subject",
+    [
+        {"kind": "ServiceAccount", "name": "bench-agent", "namespace": "bench-system"},
+        {"kind": "User", "name": "system:serviceaccount:bench-system:bench-agent"},
+        {"kind": "Group", "name": "system:serviceaccounts:bench-system"},
+    ],
+)
+def test_task_rbac_refuses_legacy_bindings_without_removing_them(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str, subject: dict[str, str]
+) -> None:
+    calls = _patch_kubectl(
+        monkeypatch, bindings=[{"metadata": {"name": name}, "subjects": [subject]}]
+    )
+    with pytest.raises(SandboxError, match=name):
+        creds.provision_agent_credentials(_PINNED, tmp_path, token_ttl_sec=1500, agent_rbac="task")
+    assert not any("token" in call or "delete" in call for call in calls)
+    assert not (tmp_path / "kubeconfig").exists()
+
+
+def test_task_rbac_does_not_reject_legacy_binding_for_another_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _patch_kubectl(
+        monkeypatch,
+        bindings=[
+            {
+                "metadata": {"name": "bench-agent-edit"},
+                "subjects": [
+                    {"kind": "ServiceAccount", "name": "other", "namespace": "bench-system"}
+                ],
+            }
+        ],
+    )
+    path = creds.provision_agent_credentials(
+        _PINNED, tmp_path, token_ttl_sec=1500, agent_rbac="task"
+    )
+    assert yaml.safe_load(path.read_text())["users"][0]["user"] == {"token": _TOKEN}
+
+
+@pytest.mark.parametrize("failure", ["identity", "token", "pod_security"])
+def test_task_rbac_never_honours_admin_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str
+) -> None:
+    monkeypatch.setenv(creds.ALLOW_ADMIN_ENV, "1")
+    calls = _patch_kubectl(
+        monkeypatch,
+        mint_fails=failure == "token",
+        service_account={} if failure == "identity" else None,
+        policy_api=failure != "pod_security",
+    )
+    with pytest.raises(SandboxError):
+        creds.provision_agent_credentials(_PINNED, tmp_path, token_ttl_sec=1500, agent_rbac="task")
+    assert not (tmp_path / "kubeconfig").exists()
+    assert not any(any("client-certificate-data" in arg for arg in call) for call in calls)
+
+
+@pytest.mark.parametrize("option", ["unpinned", "privileged"])
+def test_task_rbac_requires_pinned_cluster_and_pod_security(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, option: str
+) -> None:
+    monkeypatch.setenv(creds.ALLOW_AMBIENT_ENV, "1")
+    monkeypatch.setenv(creds.ALLOW_ADMIN_ENV, "1")
+    calls = _patch_kubectl(monkeypatch)
+    with pytest.raises(SandboxError):
+        creds.provision_agent_credentials(
+            NetworkPlan() if option == "unpinned" else _PINNED,
+            tmp_path,
+            token_ttl_sec=1500,
+            agent_rbac="task",
+            pod_security="privileged" if option == "privileged" else "baseline",
+        )
+    assert not any("apply" in call or "token" in call for call in calls)
+
+
+def test_task_rbac_rejects_policy_apply_failure_even_with_admin_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv(creds.ALLOW_ADMIN_ENV, "1")
+    calls = _patch_kubectl(monkeypatch)
+    original_run = kubectl.run
+
+    def fail_policy(argv: list[str], **kwargs: object) -> object:
+        if _applies(argv, "bench-agent-pod-security.yaml"):
+            raise SubprocessError(argv, 1, stderr="policy write forbidden")
+        return original_run(argv, **kwargs)
+
+    monkeypatch.setattr(kubectl, "run", fail_policy)
+    with pytest.raises(SandboxError, match="administrator fallback is forbidden"):
+        creds.provision_agent_credentials(_PINNED, tmp_path, token_ttl_sec=1500, agent_rbac="task")
+    assert not any("token" in call for call in calls)
+    assert not (tmp_path / "kubeconfig").exists()
+
+
+def test_task_rbac_requires_identity_read_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv(creds.ALLOW_ADMIN_ENV, "1")
+    calls = _patch_kubectl(monkeypatch)
+    original_run = kubectl.run
+
+    def missing_identity(argv: list[str], **kwargs: object) -> object:
+        if "serviceaccounts" in argv:
+            raise SubprocessError(argv, 1, stderr="serviceaccount not found")
+        return original_run(argv, **kwargs)
+
+    monkeypatch.setattr(kubectl, "run", missing_identity)
+    with pytest.raises(SandboxError, match="task must provision"):
+        creds.provision_agent_credentials(_PINNED, tmp_path, token_ttl_sec=1500, agent_rbac="task")
+    assert not any("apply" in call or "token" in call for call in calls)
+
+
+def test_unknown_rbac_mode_is_rejected_before_cluster_access(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = _patch_kubectl(monkeypatch)
+    with pytest.raises(SandboxError, match="unknown agent_rbac"):
+        creds.provision_agent_credentials(_PINNED, tmp_path, token_ttl_sec=1500, agent_rbac="typo")  # type: ignore[arg-type]
+    assert calls == []

@@ -36,8 +36,8 @@ anything but numbers.
 from __future__ import annotations
 
 import json
-import math
 import re
+from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from typing import Any, Literal
 
@@ -166,20 +166,36 @@ def _json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _json_float(text: str) -> float:
-    """Reject nonfinite constants and overflowing JSON numbers."""
-    value = float(text)
-    if not math.isfinite(value):
+def _json_decimal(text: str) -> Decimal:
+    """Decode JSON numbers exactly, rejecting nonfinite constants."""
+    try:
+        value = Decimal(text)
+    except InvalidOperation as exc:
+        raise ValueError("unsupported JSON number") from exc
+    if not value.is_finite():
         raise ValueError("nonfinite JSON number")
     return value
+
+
+def _json_order_number(value: Any) -> Decimal | None:
+    """Preserve JSON numbers while retaining quantity coercion for ordering."""
+    if isinstance(value, bool):
+        return None
+    if not isinstance(value, int | float | Decimal):
+        value = to_number(value)
+    if value is None:
+        return None
+    number = Decimal(str(value))
+    return number if number.is_finite() else None
 
 
 def _json_equal(left: Any, right: Any) -> bool:
     """Compare JSON structure without Python's bool/number equivalence."""
     if isinstance(left, bool) or isinstance(right, bool):
         return type(left) is type(right) and left == right
-    if isinstance(left, int | float) and isinstance(right, int | float):
-        return left == right
+    if isinstance(left, int | float | Decimal) and isinstance(right, int | float | Decimal):
+        a, b = Decimal(str(left)), Decimal(str(right))
+        return a.is_finite() and b.is_finite() and a == b
     if type(left) is not type(right):
         return False
     if isinstance(left, dict):
@@ -573,8 +589,8 @@ class ResourcePropertyVerifier(BaseVerifier):
             decoded = json.loads(
                 outer[0],
                 object_pairs_hook=_json_object,
-                parse_float=_json_float,
-                parse_constant=_json_float,
+                parse_float=_json_decimal,
+                parse_constant=_json_decimal,
             )
             inner = _compile(self.json_path).find(decoded)
             raw["json_path_matches"] = len(inner)
@@ -589,6 +605,17 @@ class ResourcePropertyVerifier(BaseVerifier):
             except RecursionError:
                 return "fail", "JSON comparison exceeds supported nesting depth", raw
             success = equal if self.op == "eq" else not equal
+            reason = f"JSON path {self.json_path!r} {self.op} expected value is {success}"
+        elif self.op in _ORDERING_OPS:
+            left, right = _json_order_number(value), _json_order_number(self.value)
+            if left is None or right is None:
+                return "fail", f"JSON op {self.op!r} needs finite numbers", raw
+            success = {
+                "gt": left > right,
+                "gte": left >= right,
+                "lt": left < right,
+                "lte": left <= right,
+            }[self.op]
             reason = f"JSON path {self.json_path!r} {self.op} expected value is {success}"
         else:
             success, reason = self._apply_check(value)

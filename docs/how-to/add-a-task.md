@@ -167,7 +167,8 @@ JSON, duplicate keys (including nested objects), nonfinite numbers, missing
 matches, and multiple matches fail, including for `ne`. `across_matches` and
 `op: absent` are rejected with `json_path`; use `exists` to require a decoded
 field. JSON `eq`/`ne` compare full nested structure: object order and whitespace
-do not matter, array order does, numbers compare numerically, and booleans and
+do not matter, array order does, numbers compare exactly using decimal values
+(expected YAML floats use their decimal text), and booleans and
 strings remain distinct from numbers. JSON strings do not receive Kubernetes
 quantity coercion for equality. Other operators retain their existing behavior
 on the decoded value. Checks without `json_path` are unchanged. This contract

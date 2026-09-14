@@ -995,7 +995,6 @@ def test_json_path_compares_structural_json(
         "NaN",
         "Infinity",
         "-Infinity",
-        "1e999",
         {"x": 1},
     ],
 )
@@ -1109,3 +1108,34 @@ def test_json_path_deep_comparison_fails_closed(container: str) -> None:
     assert result.success is False
     assert result.status == "fail"
     assert "comparison" in result.reason
+
+
+@pytest.mark.parametrize(
+    ("document", "expected", "op", "success"),
+    [
+        ("1.0000000000000001", 1, "eq", False),
+        ("1e-999", 0, "eq", False),
+        ("9007199254740993.0", 9007199254740992, "eq", False),
+        ("9007199254740993.0", 9007199254740993, "eq", True),
+        ("0.1", 0.1, "eq", True),
+        ("1.0", 1, "eq", True),
+        ("1.0000000000000001", 1, "ne", True),
+        ("1.0000000000000001", 1, "gt", True),
+        ("1e-999", 0, "gt", True),
+        ("1e999", 1, "gt", True),
+        ("0.1", 0.2, "lt", True),
+        ("1.0", True, "eq", False),
+        ("1.0", True, "gt", False),
+        ("1.0", "100m", "gt", True),
+        ('{"x":[0.1, true]}', {"x": [0.1, 1]}, "eq", False),
+    ],
+)
+def test_json_path_preserves_number_precision(
+    document: str, expected: Any, op: str, success: bool
+) -> None:
+    import json
+
+    with patch(_GET, return_value={"data": {"flags": document}}):
+        result = _verifier(op=op, path="data.flags", json_path="$", value=expected).verify(0)
+    assert result.success is success
+    json.dumps(result.raw)  # Decoded Decimal values must not leak into persisted raw data.

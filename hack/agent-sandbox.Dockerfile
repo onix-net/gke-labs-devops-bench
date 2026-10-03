@@ -10,7 +10,11 @@
 # Pin GEMINI_CLI_VERSION / OPENCLAW_VERSION for reproducible runs. Leaving
 # either at "latest" means the agent under test changes underneath you between
 # runs, which quietly makes results incomparable.
-FROM node:22-slim
+# The base is pinned to the exact Node/Debian the previous image was built on
+# (node v22.23.2, Debian 12 bookworm), so a rebuild changes only what the ARGs
+# below change. A floating `node:22-slim` would move Node and the Debian release
+# underneath the agents too.
+FROM node:22.23.2-bookworm-slim
 
 # OPENCLAW_VERSION / ANTHROPIC_VERTEX_PROVIDER_VERSION must be bumped together
 # (they are a matched core+plugin pair; see the anthropic-vertex install step
@@ -37,7 +41,12 @@ FROM node:22-slim
 #     sufficient on this version; an explicit `oc models auth paste-api-key`
 #     profile registration is required too).
 ARG KUBECTL_VERSION=v1.31.4
-ARG GEMINI_CLI_VERSION=latest
+# gemini-cli is pinned, not "latest": 0.58.0 is what "latest" resolved to when
+# the previous image was built, so pinning it changes nothing for existing runs.
+# Do not bump it without hack/check-agent-sandbox-models.sh passing on the new
+# image: 0.58.0 and 0.62.0 both silently swap the requested model by default
+# (see the /etc/gemini-cli/settings.json step below).
+ARG GEMINI_CLI_VERSION=0.58.0
 ARG OPENCLAW_VERSION=2026.9.1-beta.1
 ARG ANTHROPIC_VERTEX_PROVIDER_VERSION=2026.9.1-beta.1
 
@@ -97,6 +106,21 @@ RUN npm install -g "@openclaw/anthropic-vertex-provider@${ANTHROPIC_VERTEX_PROVI
  && npm uninstall -g "@openclaw/anthropic-vertex-provider" \
  && npm cache clean --force \
  && oc plugins list 2>&1 | grep -q "anthropic-vertex"
+
+# Make GEMINI_MODEL mean the model that is actually called. By default
+# gemini-cli rewrites model ids before calling Vertex: 0.58.0 turns every id
+# ending in "flash" into gemini-3.5-flash (so GEMINI_MODEL=gemini-3.7-flash ran
+# gemini-3.5-flash while the stream's init event still said gemini-3.7-flash),
+# and 0.62.0 turns gemini-3.5-flash into gemini-3.8-flash. With
+# experimental.dynamicModelConfiguration on, 0.58.0 resolves ids through its
+# model table, and an id with no entry there is sent unchanged. Checked by the
+# per-model token counts in the stream-json result event: gemini-3.5-flash and
+# gemini-3.7-flash each bill only the requested model. System settings sit
+# above user and workspace settings, so the per-run workspace settings.json the
+# harness writes (mcpServers, skills) merges with this and cannot undo it.
+RUN mkdir -p /etc/gemini-cli \
+ && printf '%s\n' '{"experimental": {"dynamicModelConfiguration": true}}' > /etc/gemini-cli/settings.json \
+ && chmod 0444 /etc/gemini-cli/settings.json
 
 # The wrapper runs this container as the host user's uid:gid so files written to
 # the mounted workspace are owned correctly. That uid does not exist in
